@@ -56,7 +56,11 @@ export default function TrickshotGame() {
     hoopDragOffY: 0,
     keys: {} as Record<string, boolean>,
     trailPoints: [] as {x: number, y: number, s: number}[],
-    notifIdCounter: 0
+    notifIdCounter: 0,
+    isDrawing: false,
+    drawStartX: 0, drawStartY: 0, drawCurrX: 0, drawCurrY: 0,
+    customBodies: [] as Matter.Body[],
+    particles: [] as {x: number, y: number, vx: number, vy: number, life: number, maxLife: number, color: string}[]
   });
 
   const showNotif = (title: string, subtitle: string, color: string) => {
@@ -142,10 +146,23 @@ export default function TrickshotGame() {
         const isSurface = bodyA.label === 'surface' || bodyB.label === 'surface';
         const isHoop = bodyA.label === 'hoop' || bodyB.label === 'hoop';
         
-        if (isBall && isSurface) {
+        const isBouncy = bodyA.label === 'bouncy_pad' || bodyB.label === 'bouncy_pad';
+        if (isBall && (isSurface || isBouncy)) {
           stateRef.current.lastSurfaceContact = Date.now();
           const vel = Math.sqrt(ball.velocity.x**2 + ball.velocity.y**2);
-          triggerShake(Math.min(vel * 0.4, 5));
+          const color = isBouncy ? '#f43f5e' : '#94a3b8';
+          const intensity = isBouncy ? 0.6 : 0.4;
+          triggerShake(Math.min(vel * intensity, isBouncy ? 8 : 5));
+          if (vel > 5) {
+             for(let i=0; i< (isBouncy ? 15 : 8); i++) {
+                stateRef.current.particles.push({
+                   x: ball.position.x, y: ball.position.y + (isBouncy?0:10),
+                   vx: (Math.random()-0.5)*vel * (isBouncy?1.5:1), vy: (isBouncy ? (Math.random()-0.5)*vel*1.5 : -Math.random()*vel),
+                   life: 1, maxLife: 0.5 + Math.random(),
+                   color
+                });
+             }
+          }
         }
         if (isBall && isHoop) scoreGoal();
       });
@@ -224,6 +241,12 @@ export default function TrickshotGame() {
         st.dragTarget = true; 
         st.hoopDragOffX = dx; 
         st.hoopDragOffY = dy; 
+      } else {
+        st.isDrawing = true;
+        st.drawStartX = worldX;
+        st.drawStartY = worldY;
+        st.drawCurrX = worldX;
+        st.drawCurrY = worldY;
       }
     };
     const handleMove = (clientX: number, clientY: number) => {
@@ -234,9 +257,38 @@ export default function TrickshotGame() {
         st.hoopX = worldX - st.hoopDragOffX;
         st.hoopY = worldY - st.hoopDragOffY;
         Body.setPosition(hoopSensor, { x: st.hoopX, y: st.hoopY });
+      } else if (st.isDrawing) {
+        const worldX = (clientX - W/2) / st.cameraZoom + W/2 + st.cameraX;
+        const worldY = (clientY - H/2) / st.cameraZoom + H/2 + st.cameraY;
+        st.drawCurrX = worldX;
+        st.drawCurrY = worldY;
       }
     };
-    const handleUp = () => { stateRef.current.dragTarget = false; };
+    const handleUp = () => { 
+      const st = stateRef.current;
+      if (st.isDrawing) {
+        st.isDrawing = false;
+        const dx = st.drawCurrX - st.drawStartX;
+        const dy = st.drawCurrY - st.drawStartY;
+        const dist = Math.sqrt(dx*dx + dy*dy);
+        if (dist > 30) {
+          const cx = st.drawStartX + dx/2;
+          const cy = st.drawStartY + dy/2;
+          const angle = Math.atan2(dy, dx);
+          const thickness = 14;
+          const pad = Bodies.rectangle(cx, cy, dist, thickness, {
+            isStatic: true,
+            angle: angle,
+            restitution: 1.5,
+            friction: 0.05,
+            label: 'bouncy_pad'
+          });
+          World.add(world, pad);
+          st.customBodies.push(pad);
+        }
+      }
+      st.dragTarget = false; 
+    };
 
     const onMouseDown = (e: MouseEvent) => handleDown(e.clientX, e.clientY);
     const onMouseMove = (e: MouseEvent) => handleMove(e.clientX, e.clientY);
@@ -378,15 +430,10 @@ export default function TrickshotGame() {
       st.cameraY += (targetCamY - st.cameraY) * 0.1;
       st.cameraZoom += (targetZoom - st.cameraZoom) * 0.05;
 
-      // Update background grid via pure CSS variable injection to prevent react render
-      const bg = document.getElementById('bg-grid');
-      if (bg) {
-        bg.style.backgroundPosition = `${-st.cameraX * st.cameraZoom}px ${-st.cameraY * st.cameraZoom}px`;
-        bg.style.backgroundSize = `${40 * st.cameraZoom}px ${40 * st.cameraZoom}px`;
-      }
-
       // Clear the canvas globally before translating
-      ctx.clearRect(0, 0, W, H);
+      // Use plain background for better performance and aesthetic
+      ctx.fillStyle = '#f8fafc'; // bg-slate-50 plain background
+      ctx.fillRect(0, 0, W, H);
 
       // Setup Camera Transform
       ctx.save();
@@ -399,33 +446,75 @@ export default function TrickshotGame() {
       // Pan camera
       ctx.translate(-st.cameraX, -st.cameraY);
 
+      // Draw explicit surface ground
+      ctx.fillStyle = '#e2e8f0';
+      ctx.fillRect(-W*4, H, W*10, 800);
+
       // Trail
       if (st.trailPoints.length >= 2) {
         for (let i = 1; i < st.trailPoints.length; i++) {
           const p0 = st.trailPoints[i-1], p1 = st.trailPoints[i];
           const alpha = (1 - i/st.trailPoints.length) * Math.min(p0.s/20, 1) * 0.7;
           ctx.beginPath(); ctx.moveTo(p0.x, p0.y); ctx.lineTo(p1.x, p1.y);
-          ctx.strokeStyle = `rgba(0,160,255,${alpha})`; 
+          ctx.strokeStyle = `rgba(14, 165, 233, ${alpha})`; // sky-500
           ctx.lineWidth = (1 - i/st.trailPoints.length) * 6;
           ctx.lineCap = 'round'; ctx.stroke();
         }
       }
 
+      // Draw custom bouncy pads
+      st.customBodies.forEach(b => {
+        if (b.label === 'bouncy_pad') {
+           ctx.beginPath();
+           ctx.moveTo(b.vertices[0].x, b.vertices[0].y);
+           for(let j=1; j<b.vertices.length; j++) ctx.lineTo(b.vertices[j].x, b.vertices[j].y);
+           ctx.closePath();
+           ctx.fillStyle = '#f43f5e'; // rose-500
+           ctx.fill();
+        }
+      });
+
+      // Draw Drawing state
+      if (st.isDrawing) {
+         ctx.beginPath();
+         ctx.moveTo(st.drawStartX, st.drawStartY);
+         ctx.lineTo(st.drawCurrX, st.drawCurrY);
+         ctx.strokeStyle = '#f43f5e';
+         ctx.lineWidth = 14;
+         ctx.lineCap = 'round';
+         ctx.globalAlpha = 0.5;
+         ctx.stroke();
+         ctx.globalAlpha = 1.0;
+      }
+
+      // Particles
+      for(let i=st.particles.length-1; i>=0; i--) {
+        const p = st.particles[i];
+        p.x += p.vx; p.y += p.vy;
+        p.vy += 0.5; // gravity
+        p.life -= 0.03;
+        if (p.life <= 0) { st.particles.splice(i, 1); continue; }
+        ctx.fillStyle = p.color;
+        ctx.globalAlpha = p.life / p.maxLife;
+        ctx.beginPath(); ctx.arc(p.x, p.y, Math.max(1, (p.life / p.maxLife) * 6), 0, Math.PI*2); ctx.fill();
+      }
+      ctx.globalAlpha = 1.0;
+
       // Hoop
       const hhX = st.hoopX, hhY = st.hoopY;
       const rimW = 44, rimH = 8, backH = 60, backW = 8;
       ctx.save();
-      ctx.fillStyle = '#111823'; ctx.strokeStyle = '#38bdf8'; ctx.lineWidth = 1.5;
+      ctx.fillStyle = '#cbd5e1'; ctx.strokeStyle = '#94a3b8'; ctx.lineWidth = 1.5;
       ctx.fillRect(hhX + rimW/2 + 6, hhY - backH/2, backW, backH);
       ctx.strokeRect(hhX + rimW/2 + 6, hhY - backH/2, backW, backH);
       
-      ctx.fillStyle = '#ea580c'; ctx.strokeStyle = '#fb923c'; ctx.lineWidth = 3;
+      ctx.fillStyle = '#f97316'; ctx.strokeStyle = '#ea580c'; ctx.lineWidth = 3;
       ctx.beginPath(); ctx.ellipse(hhX, hhY, rimW/2, rimH/2, 0, 0, Math.PI*2); ctx.fill(); ctx.stroke();
       
       const dist = Math.sqrt((ball.position.x - hhX)**2 + (ball.position.y - hhY)**2);
       if (dist < 80) {
         ctx.beginPath(); ctx.ellipse(hhX, hhY, rimW/2, rimH/2, 0, 0, Math.PI*2);
-        ctx.strokeStyle = `rgba(52, 211, 153, ${(1 - dist/80)*0.8})`; 
+        ctx.strokeStyle = `rgba(16, 185, 129, ${(1 - dist/80)*0.8})`; 
         ctx.lineWidth = 4; ctx.stroke();
       }
       ctx.restore();
@@ -441,21 +530,21 @@ export default function TrickshotGame() {
       ctx.rotate(angle);
       ctx.scale(stretch, squash);
       
-      // Core Glow
+      // Core Glow (Blue on White background)
       const glow = ctx.createRadialGradient(0,0,ballRadius*0.2, 0,0,ballRadius*1.8);
-      glow.addColorStop(0, 'rgba(56, 189, 248, 0.4)'); 
-      glow.addColorStop(1, 'rgba(2, 132, 199, 0)');
+      glow.addColorStop(0, 'rgba(14, 165, 233, 0.6)'); 
+      glow.addColorStop(1, 'rgba(14, 165, 233, 0)');
       ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(0,0,ballRadius*1.8,0,Math.PI*2); ctx.fill();
       
       // Outer
       const bgCircle = ctx.createRadialGradient(-4,-4,2, 0,0,ballRadius);
-      bgCircle.addColorStop(0,'#7dd3fc'); 
-      bgCircle.addColorStop(0.5,'#0284c7'); 
-      bgCircle.addColorStop(1,'#0c4a6e');
+      bgCircle.addColorStop(0,'#38bdf8'); 
+      bgCircle.addColorStop(0.5,'#0ea5e9'); 
+      bgCircle.addColorStop(1,'#0284c7');
       ctx.fillStyle = bgCircle; ctx.beginPath(); ctx.arc(0,0,ballRadius,0,Math.PI*2); ctx.fill();
       
       // Lines
-      ctx.strokeStyle = 'rgba(255,255,255,0.2)'; ctx.lineWidth = 1;
+      ctx.strokeStyle = 'rgba(255,255,255,0.6)'; ctx.lineWidth = 1;
       ctx.beginPath(); ctx.arc(0,0,ballRadius*0.7,-0.5,2.5); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(-ballRadius,0); ctx.lineTo(ballRadius,0); ctx.stroke();
       ctx.restore();
@@ -483,11 +572,7 @@ export default function TrickshotGame() {
   }, []);
 
   return (
-    <div ref={containerRef} className="relative w-full h-screen bg-[#050608] text-slate-200 font-sans overflow-hidden select-none">
-      {/* Background Grid */}
-      <div id="bg-grid" className="absolute inset-0 opacity-10 pointer-events-none" style={{ backgroundImage: 'linear-gradient(#22d3ee 1px, transparent 1px), linear-gradient(90deg, #22d3ee 1px, transparent 1px)', backgroundSize: '40px 40px' }} />
-      <div className="absolute inset-0 pointer-events-none" style={{ background: 'radial-gradient(circle at center, transparent 0%, #050608 100%)' }} />
-
+    <div ref={containerRef} className="relative w-full h-screen bg-slate-50 text-slate-800 font-sans overflow-hidden select-none">
       <canvas 
         ref={canvasRef} 
         className="block touch-none relative z-10"
@@ -495,45 +580,45 @@ export default function TrickshotGame() {
       
       {/* Top Left: Scoring System */}
       <div className="absolute top-6 left-6 flex gap-4 z-20 pointer-events-none">
-        <div className="bg-slate-900/60 border border-cyan-500/30 backdrop-blur-md rounded-lg p-4 w-40">
-          <div className="text-[10px] uppercase tracking-widest text-cyan-400/60 font-bold mb-1">Current Score</div>
-          <div className="text-4xl font-black text-white tabular-nums tracking-tighter shadow-sky-400">
+        <div className="bg-white/80 border border-slate-200 backdrop-blur-md rounded-lg p-4 w-40 shadow-sm">
+          <div className="text-[10px] uppercase tracking-widest text-slate-400 font-bold mb-1">Current Score</div>
+          <div className="text-4xl font-black text-slate-900 tabular-nums tracking-tighter shadow-sky-400">
             {score}
           </div>
         </div>
-        <div className="bg-slate-900/60 border border-orange-500/30 backdrop-blur-md rounded-lg p-4 w-32 flex flex-col justify-between hidden md:flex">
-          <div className="text-[10px] uppercase tracking-widest text-orange-400/60 font-bold mb-1">Multiplier</div>
-          <div className="text-4xl font-black text-orange-400 tabular-nums tracking-tighter leading-none">x{streak}</div>
+        <div className="bg-white/80 border border-slate-200 backdrop-blur-md rounded-lg p-4 w-32 flex flex-col justify-between hidden md:flex shadow-sm">
+          <div className="text-[10px] uppercase tracking-widest text-orange-400 font-bold mb-1">Multiplier</div>
+          <div className="text-4xl font-black text-orange-500 tabular-nums tracking-tighter leading-none">x{streak}</div>
         </div>
-        <div className="bg-slate-900/60 border border-cyan-500/30 backdrop-blur-md rounded-lg p-4 w-32 flex flex-col justify-between hidden md:flex">
-          <div className="text-[10px] uppercase tracking-widest text-cyan-400/60 font-bold mb-1">Pulses</div>
-          <div className="text-4xl font-black text-cyan-400 tabular-nums tracking-tighter leading-none">{pulses}</div>
+        <div className="bg-white/80 border border-slate-200 backdrop-blur-md rounded-lg p-4 w-32 flex flex-col justify-between hidden md:flex shadow-sm">
+          <div className="text-[10px] uppercase tracking-widest text-cyan-400 font-bold mb-1">Pulses</div>
+          <div className="text-4xl font-black text-cyan-500 tabular-nums tracking-tighter leading-none">{pulses}</div>
         </div>
       </div>
 
       {/* Top Right: Environment Telemetry */}
       <div className="absolute top-6 right-6 flex flex-col gap-2 z-20 pointer-events-none">
-        <div className="bg-slate-900/60 border border-slate-700/50 backdrop-blur-md rounded-lg p-3 w-48">
-          <div className="text-[9px] uppercase tracking-widest text-slate-500 font-bold mb-2">Stability Matrix</div>
+        <div className="bg-white/90 border border-slate-200 backdrop-blur-md rounded-lg p-3 w-48 shadow-sm">
+          <div className="text-[9px] uppercase tracking-widest text-slate-400 font-bold mb-2">Stability Matrix</div>
           <div className="flex flex-col gap-1.5">
             <div className="flex justify-between items-center">
-              <span className="text-[10px] text-slate-400">VEL-X</span>
-              <span ref={velxRef} className="text-[11px] font-mono text-cyan-400">+0.0 m/s</span>
+              <span className="text-[10px] text-slate-500">VEL-X</span>
+              <span ref={velxRef} className="text-[11px] font-mono text-slate-800">+0.0 m/s</span>
             </div>
             <div className="flex justify-between items-center">
-              <span className="text-[10px] text-slate-400">VEL-Y</span>
-              <span ref={velyRef} className="text-[11px] font-mono text-cyan-400">0.0 m/s</span>
+              <span className="text-[10px] text-slate-500">VEL-Y</span>
+              <span ref={velyRef} className="text-[11px] font-mono text-slate-800">0.0 m/s</span>
             </div>
             <div className="flex justify-between items-center">
-              <span className="text-[10px] text-slate-400">STABILITY</span>
-              <span ref={stabilityRef} className="text-[11px] font-mono text-orange-400">100%</span>
+              <span className="text-[10px] text-slate-500">STABILITY</span>
+              <span ref={stabilityRef} className="text-[11px] font-mono text-slate-800 font-bold">100%</span>
             </div>
           </div>
         </div>
-        <div className="bg-cyan-500/10 border border-cyan-500/20 backdrop-blur-md rounded-lg px-3 py-2 flex items-center justify-between">
-          <span className="text-[9px] text-cyan-400 font-bold tracking-widest uppercase">Target State</span>
-          <span className="text-[10px] text-white flex items-center gap-1.5">
-            <span id="target-state-dot" className="w-1.5 h-1.5 rounded-full bg-cyan-400 shadow-[0_0_8px_#22d3ee]"></span>
+        <div className="bg-slate-100 border border-slate-200 backdrop-blur-md rounded-lg px-3 py-2 flex items-center justify-between shadow-sm">
+          <span className="text-[9px] text-slate-500 font-bold tracking-widest uppercase">Target State</span>
+          <span className="text-[10px] text-slate-800 flex items-center gap-1.5 font-bold">
+            <span id="target-state-dot" className="w-2 h-2 rounded-full bg-cyan-400 shadow-sm"></span>
             <span ref={hoopStateRef}>FLOATING</span>
           </span>
         </div>
@@ -544,40 +629,40 @@ export default function TrickshotGame() {
         <div className="w-full max-w-xl px-12">
           <div className="flex justify-between items-end mb-2">
             <div>
-              <div className="text-[10px] text-slate-500 font-bold uppercase tracking-widest mb-1">Apex Synchronization</div>
-              <div ref={apexStateRef} className="text-xs text-amber-400 font-mono italic">ARC PEAK DETECTED</div>
+              <div className="text-[10px] text-slate-400 font-bold uppercase tracking-widest mb-1">Apex Synchronization</div>
+              <div ref={apexStateRef} className="text-xs text-amber-500 font-mono italic font-bold">ARC PEAK DETECTED</div>
             </div>
-            <div id="apex-pct-label" className="text-right font-mono text-2xl text-amber-400">0%</div>
+            <div id="apex-pct-label" className="text-right font-mono text-2xl text-amber-500 font-bold">0%</div>
           </div>
           {/* Main Gauge */}
-          <div className="h-4 w-full bg-slate-900 rounded-full p-1 border border-slate-800 shadow-inner">
-            <div ref={apexBarRef} className="h-full rounded-full bg-gradient-to-r from-cyan-500 via-amber-400 to-amber-500 shadow-[0_0_15px_rgba(251,191,36,0.5)] transition-[width,background-color] ease-out" style={{ width: '0%', backgroundColor: '#06b6d4' }}></div>
+          <div className="h-4 w-full bg-slate-200 rounded-full p-1 border border-slate-300 shadow-inner">
+            <div ref={apexBarRef} className="h-full rounded-full bg-gradient-to-r from-cyan-400 via-amber-400 to-amber-500 shadow-sm transition-[width,background-color] ease-out" style={{ width: '0%', backgroundColor: '#06b6d4' }}></div>
           </div>
         </div>
 
-        <div className="hidden md:flex gap-12 mt-8 opacity-40">
+        <div className="hidden md:flex gap-12 mt-8">
           <div className="flex flex-col items-center">
-            <kbd className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs font-bold text-white font-sans">SPACE</kbd>
-            <span className="text-[9px] uppercase tracking-tighter mt-1 text-white">AERIAL PULSE</span>
+            <kbd className="bg-white border border-slate-200 shadow-sm rounded px-2 py-1 text-xs font-bold text-slate-600 font-sans">SPACE</kbd>
+            <span className="text-[9px] uppercase tracking-tighter mt-1 text-slate-400 font-bold">AERIAL PULSE</span>
           </div>
           <div className="flex flex-col items-center">
-            <kbd className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs font-bold text-white font-sans">WASD</kbd>
-            <span className="text-[9px] uppercase tracking-tighter mt-1 text-white">VECTOR SHIFT</span>
+            <kbd className="bg-white border border-slate-200 shadow-sm rounded px-2 py-1 text-xs font-bold text-slate-600 font-sans">WASD</kbd>
+            <span className="text-[9px] uppercase tracking-tighter mt-1 text-slate-400 font-bold">VECTOR SHIFT</span>
           </div>
           <div className="flex flex-col items-center">
-            <kbd className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs font-bold text-white font-sans">DRAG</kbd>
-            <span className="text-[9px] uppercase tracking-tighter mt-1 text-white">ADJUST TARGET</span>
+            <kbd className="bg-white border border-slate-200 shadow-sm rounded px-2 py-1 text-xs font-bold text-slate-600 font-sans">DRAG DRAW</kbd>
+            <span className="text-[9px] uppercase tracking-tighter mt-1 text-slate-400 font-bold">CREATE TRAMPOLINE</span>
           </div>
         </div>
       </div>
 
       {/* Corner Decoration / Telemetry */}
-      <div className="absolute bottom-6 left-6 font-mono text-[10px] text-slate-600 z-20 pointer-events-none hidden md:block">
+      <div className="absolute bottom-6 left-6 font-mono text-[10px] text-slate-400 z-20 pointer-events-none hidden md:block">
         PHYSICS_RUNTIME: MATTER_0.19<br/>
         ENGINE_STATE: HIGH_PRECISION<br/>
         BUFFER: 0ms
       </div>
-      <div className="absolute bottom-6 right-6 text-right font-mono text-[10px] text-slate-600 z-20 pointer-events-none hidden md:block">
+      <div className="absolute bottom-6 right-6 text-right font-mono text-[10px] text-slate-400 z-20 pointer-events-none hidden md:block">
         SYNC_FREQ: 60Hz<br/>
         LATENCY: 1.2ms<br/>
         INST_REFLEX: 150ms
@@ -596,16 +681,16 @@ export default function TrickshotGame() {
               className="text-center absolute w-full"
             >
               <div 
-                className="text-5xl md:text-6xl font-black italic tracking-tighter text-white uppercase animate-pulse"
+                className="text-5xl md:text-6xl font-black italic tracking-tighter uppercase"
                 style={{ 
-                  filter: `drop-shadow(0 0 20px ${notif.color})`
+                  color: notif.color,
+                  textShadow: `0 4px 20px ${notif.color}40`
                 }}
               >
                 {notif.title}
               </div>
               <div 
-                className="text-xs md:text-sm tracking-[0.4em] font-bold mt-2"
-                style={{ color: notif.color }}
+                className="text-xs md:text-sm tracking-[0.4em] font-bold mt-2 text-slate-600"
               >
                 {notif.subtitle}
               </div>
@@ -624,7 +709,7 @@ export default function TrickshotGame() {
             transition={{ duration: 0.3 }}
             className="absolute inset-0 pointer-events-none z-10"
             style={{
-              background: 'radial-gradient(ellipse at center, rgba(16, 185, 129, 0.15) 0%, transparent 60%)'
+              background: 'radial-gradient(ellipse at center, rgba(16, 185, 129, 0.4) 0%, transparent 60%)'
             }}
           />
         )}
