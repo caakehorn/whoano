@@ -62,8 +62,17 @@ export default function TrickshotGame() {
     customBodies: [] as Matter.Body[],
     particles: [] as {x: number, y: number, vx: number, vy: number, life: number, maxLife: number, color: string}[],
     chainCount: 0,
-    hasAirPulse: true
+    hasAirPulse: true,
+    isMeteorStomping: false,
+    stompImpactTime: 0,
+    airChargeTime: 0,
+    lastAirCharge: 0,
+    psychedelia: 0,
+    bufferedSpaceTime: 0,
+    justLaunched: 0
   });
+
+  const bgEffectRef = useRef<HTMLDivElement>(null);
 
   const showNotif = (title: string, subtitle: string, color: string) => {
     stateRef.current.notifIdCounter++;
@@ -145,7 +154,7 @@ export default function TrickshotGame() {
       setStreak(stateRef.current.streak);
       
       triggerShake(8);
-      showNotif('SCORE!', `+${pts} · STREAK x${stateRef.current.streak}`, '#00ff88');
+      showNotif('SCORE!', `+${pts}`, '#00ff88');
     };
 
     Events.on(engine, 'collisionStart', event => {
@@ -156,9 +165,37 @@ export default function TrickshotGame() {
         
         const isBouncy = bodyA.label === 'bouncy_pad' || bodyB.label === 'bouncy_pad';
         if (isBall && (isSurface || isBouncy)) {
-          stateRef.current.lastSurfaceContact = Date.now();
-          stateRef.current.chainCount = 0;
-          stateRef.current.hasAirPulse = true;
+          const st = stateRef.current;
+          st.lastSurfaceContact = Date.now();
+          st.chainCount = 0;
+          st.hasAirPulse = true;
+          
+          const velY = Math.abs(ball.velocity.y);
+          if (st.isMeteorStomping || velY > 15 || st.airChargeTime > 50) {
+             st.stompImpactTime = Date.now();
+             st.lastAirCharge = st.airChargeTime;
+             
+             st.isMeteorStomping = false;
+             st.airChargeTime = 0;
+             triggerShake(12 + st.lastAirCharge / 40);
+             for(let i=0; i<15 + st.lastAirCharge/20; i++) {
+                st.particles.push({
+                   x: ball.position.x, y: ball.position.y + 10,
+                   vx: (Math.random()-0.5)*15, vy: -Math.random()*10,
+                   life: 1, maxLife: 1, color: '#f43f5e'
+                });
+             }
+             
+             // Jump Buffering Trigger
+             if (Date.now() - st.bufferedSpaceTime < 150) {
+                 st.bufferedSpaceTime = 0;
+                 setTimeout(() => doPulse(), 10); // execute just after physics resolve
+             }
+          } else {
+             st.airChargeTime = 0;
+             st.lastAirCharge = 0;
+          }
+
           const vel = Math.sqrt(ball.velocity.x**2 + ball.velocity.y**2);
           const color = isBouncy ? '#f43f5e' : '#94a3b8';
           const intensity = isBouncy ? 0.6 : 0.4;
@@ -189,22 +226,91 @@ export default function TrickshotGame() {
       const st = stateRef.current;
       const { x: vx, y: vy } = ball.velocity;
       const sinceContact = Date.now() - st.lastSurfaceContact;
-      const absVY = Math.abs(vy);
+      const isGround = sinceContact < 150;
+      
+      const isUp = st.keys['KeyW'] || st.keys['ArrowUp'];
+      const isDown = st.keys['KeyS'] || st.keys['ArrowDown'];
+      const timeSinceImpact = Date.now() - st.stompImpactTime;
 
-      // 1. Ground Jump
-      if (sinceContact < 150) {
-        st.pulses++;
-        setPulses(st.pulses);
-        st.chainCount = 0;
-        st.hasAirPulse = true;
-        triggerShake(5);
-        Body.setVelocity(ball, { x: vx, y: -22 });
-        return;
+      // --- GROUND LAUNCH LOGIC ---
+      if (isGround) {
+          if (isDown) {
+              st.justLaunched = Date.now();
+              // Perfect Tech Window
+              if (timeSinceImpact < 150 && st.stompImpactTime > 0) {
+                  const perfRatio = 1 - (timeSinceImpact / 150); // 1.0 is frame perfect
+                  const chargeMult = Math.min(st.lastAirCharge / 400, 3.0);
+                  const bonusAdd = Math.floor(3 + chargeMult * 3 + perfRatio * 4);
+
+                  st.pulses++;
+                  setPulses(st.pulses);
+                  st.chainCount += bonusAdd;
+                  st.hasAirPulse = true;
+                  st.psychedelia = Math.max(0.6, chargeMult * 1.5 + perfRatio * 1.5);
+                  triggerShake(30 + perfRatio * 20 + chargeMult * 15);
+                  
+                  let title = "PERFECT!";
+                  let color = "#10b981";
+                  if (perfRatio > 0.8) { title = "FRAME PERFECT!!"; color = "#ffffff"; }
+                  showNotif(title, `+${bonusAdd} SURGE`, color);
+
+                  const extraH = st.keys['KeyD'] || st.keys['ArrowRight'] ? 15 : (st.keys['KeyA'] || st.keys['ArrowLeft'] ? -15 : 0);
+                  const powerY = -30 - (st.chainCount * 1.0) - (chargeMult * 12) - (perfRatio * 10);
+                  Body.setVelocity(ball, { x: vx + extraH, y: powerY });
+                  
+                  st.stompImpactTime = 0;
+                  st.lastAirCharge = 0;
+                  
+                  for(let i=0; i<40 + perfRatio*30; i++) {
+                      st.particles.push({
+                        x: ball.position.x, y: ball.position.y,
+                        vx: (Math.random()-0.5)*30, vy: (Math.random()-0.5)*30,
+                        life: 1, maxLife: 1.5, color: '#10b981'
+                      });
+                  }
+                  return;
+              } else {
+                  // Standard Charged Launch (Down + Space, un-timed)
+                  st.pulses++;
+                  setPulses(st.pulses);
+                  st.chainCount = 0; 
+                  st.hasAirPulse = true;
+                  triggerShake(10);
+                  showNotif('HEAVY LAUNCH', '', '#f59e0b');
+                  const extraH = st.keys['KeyD'] || st.keys['ArrowRight'] ? 10 : (st.keys['KeyA'] || st.keys['ArrowLeft'] ? -10 : 0);
+                  Body.setVelocity(ball, { x: vx + extraH, y: -26 });
+                  return;
+              }
+          } else if (isUp) {
+              st.justLaunched = Date.now();
+              st.pulses++;
+              setPulses(st.pulses);
+              st.chainCount = 0;
+              st.hasAirPulse = true;
+              triggerShake(4);
+              showNotif('HOP', '', '#94a3b8');
+              const extraH = st.keys['KeyD'] || st.keys['ArrowRight'] ? 8 : (st.keys['KeyA'] || st.keys['ArrowLeft'] ? -8 : 0);
+              Body.setVelocity(ball, { x: vx + extraH, y: -18 });
+              return;
+          } else {
+              showNotif('LOCKED', '▲ / ▼ + SPACE', '#ef4444');
+              triggerShake(3);
+              return;
+          }
       }
+
+      // --- AIR JUMP LOGIC ---
+      // Input buffering an upcoming crash landing
+      if (isDown && ball.velocity.y > 5) {
+          st.bufferedSpaceTime = Date.now();
+          return;
+      }
+      
+      const absVY = Math.abs(vy);
 
       // 2. Air Jump
       if (!st.hasAirPulse) {
-        showNotif('EXHAUSTED', 'TOUCH GROUND TO RESET', '#64748b');
+        showNotif('NO CHARGE', '', '#64748b');
         return;
       }
 
@@ -219,7 +325,7 @@ export default function TrickshotGame() {
         st.hasAirPulse = true; 
         
         triggerShake(15 + st.chainCount * 3);
-        showNotif(`PERFECT x${st.chainCount}`, 'APEX SHATTER!', '#fbbf24');
+        showNotif(`APEX PERFECT!`, `x${st.chainCount}`, '#fbbf24');
         
         // Explosion particles
         for(let i=0; i<30; i++) {
@@ -239,43 +345,33 @@ export default function TrickshotGame() {
         st.chainCount = 0;
         st.hasAirPulse = false;
         triggerShake(4);
-        showNotif('AIR JUMP', 'CHAIN BROKEN', '#94a3b8');
+        showNotif('WEAK ARC', 'CHAIN DROPPED', '#94a3b8');
         Body.setVelocity(ball, { x: vx, y: -16 });
       }
     };
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.repeat) return; // Ignore hold repeats for action triggers
-      stateRef.current.keys[e.code] = true;
+      const st = stateRef.current;
+      
+      st.keys[e.code] = true;
       
       if (e.code === 'Space') { 
         e.preventDefault(); 
         doPulse(); 
       }
       
-      // STOMP / DASH Mechanics
+      // STOMP / DASH / LAUNCH Mechanics
       if (e.code === 'KeyS' || e.code === 'ArrowDown') {
-         const st = stateRef.current;
          const sinceContact = Date.now() - st.lastSurfaceContact;
          if (sinceContact > 150) {
-            // METEOR STOMP
-            Body.setVelocity(ball, { x: ball.velocity.x * 0.3, y: 35 });
-            triggerShake(15);
-            showNotif('STOMP', 'METEOR CRASH', '#f43f5e');
-            for(let i=0; i<15; i++) {
-               st.particles.push({
-                 x: ball.position.x, y: ball.position.y,
-                 vx: (Math.random()-0.5)*12, vy: -5 - Math.random()*15,
-                 life: 1, maxLife: 1, color: '#f43f5e'
-               });
-            }
-         } else {
-            // GROUND DASH
-            const dx = st.keys['KeyD'] || st.keys['ArrowRight'] ? 1 : (st.keys['KeyA'] || st.keys['ArrowLeft'] ? -1 : 0);
-            if (dx !== 0) {
-               Body.setVelocity(ball, { x: dx * 35, y: ball.velocity.y });
-               triggerShake(8);
-               showNotif('DASH', 'GROUND BOOST', '#10b981');
+            // METEOR STOMP INIT
+            if (!st.isMeteorStomping) {
+               st.isMeteorStomping = true;
+               st.airChargeTime = 0;
+               Body.setVelocity(ball, { x: ball.velocity.x * 0.3, y: Math.max(ball.velocity.y, 18) });
+               triggerShake(12);
+               showNotif('DIVE', '', '#f43f5e');
             }
          }
       }
@@ -285,6 +381,9 @@ export default function TrickshotGame() {
 
     const handleKeyUp = (e: KeyboardEvent) => {
       stateRef.current.keys[e.code] = false;
+      if (e.code === 'KeyS' || e.code === 'ArrowDown') {
+         stateRef.current.isMeteorStomping = false; // Cancel stomp physics if released early
+      }
     };
 
     document.addEventListener('keydown', handleKeyDown);
@@ -411,6 +510,23 @@ export default function TrickshotGame() {
         const sinceContact = Date.now() - st.lastSurfaceContact;
         const isAirborne = Math.abs(ball.velocity.y) > 0.5 && sinceContact > 150;
         
+        // Apply Psychedelia Decay
+        if (st.psychedelia > 0) {
+           st.psychedelia -= timeStep / 1000;
+           if (st.psychedelia < 0) st.psychedelia = 0;
+           if (bgEffectRef.current) {
+              if (st.psychedelia > 0) {
+                 const p = Math.min(1, st.psychedelia);
+                 bgEffectRef.current.style.opacity = p.toString();
+                 const spin = Date.now() * 0.1;
+                 // Using transform instead of filter to maintain 60fps easily
+                 bgEffectRef.current.style.transform = `scale(${1 + p*0.2}) rotate(${spin}deg)`;
+              } else {
+                 bgEffectRef.current.style.opacity = '0';
+              }
+           }
+        }
+
         // Horizontal Control (always active but weaker than dash)
         let dx = 0;
         if (st.keys['KeyA'] || st.keys['ArrowLeft']) dx -= 1;
@@ -419,6 +535,36 @@ export default function TrickshotGame() {
         if (dx !== 0) {
           const speedFactor = isAirborne ? 0.0006 : 0.0002;
           Body.applyForce(ball, ball.position, { x: dx * speedFactor * ball.mass, y: 0 });
+        }
+
+        // Anti-Bounce (Stick to ground)
+        const isS_Held = st.keys['KeyS'] || st.keys['ArrowDown'];
+        if (isS_Held && sinceContact < 100 && (Date.now() - st.justLaunched > 150)) {
+           // kill upward bounce if the ball tries to rebound while crouching
+           if (ball.velocity.y < -0.2) {
+              Body.setVelocity(ball, { x: ball.velocity.x, y: 0 });
+           }
+        }
+
+        // Holding S for charge
+        if (isAirborne && isS_Held && !st.dragTarget) {
+           st.airChargeTime += timeStep;
+           
+           // Apply downward acceleration
+           Body.applyForce(ball, ball.position, { x: 0, y: 0.0008 * ball.mass * (1 + st.airChargeTime/200) });
+           if (ball.velocity.y > 45) Body.setVelocity(ball, { x: ball.velocity.x, y: 45 }); // Cap velocity
+           
+           // Visual charging particles
+           if (Math.random() < 0.3) {
+              st.particles.push({
+                 x: ball.position.x + (Math.random()-0.5)*24,
+                 y: ball.position.y - 12 + (Math.random()-0.5)*10,
+                 vx: (Math.random()-0.5)*2,
+                 vy: -1 - Math.random()*5,
+                 life: 1, maxLife: 0.4 + st.airChargeTime/2000,
+                 color: st.airChargeTime > 300 ? '#fbbf24' : '#f43f5e'
+              });
+           }
         }
 
         Engine.update(engine, timeStep);
@@ -559,18 +705,31 @@ export default function TrickshotGame() {
       }
 
       // Particles
-      for(let i=st.particles.length-1; i>=0; i--) {
+      ctx.globalCompositeOperation = 'lighter';
+      for(let i = 0; i < st.particles.length; i++) {
         const p = st.particles[i];
         p.x += p.vx; 
         p.y += p.vy;
         p.vy += 0.5; // gravity
         p.life -= 0.03;
-        if (p.life <= 0) { st.particles.splice(i, 1); continue; }
-        ctx.fillStyle = p.color;
-        ctx.globalAlpha = p.life / p.maxLife;
-        ctx.beginPath(); ctx.arc(p.x, p.y, Math.max(1, (p.life / p.maxLife) * 6), 0, Math.PI*2); ctx.fill();
       }
+      
+      const activeParticles = [];
+      for(let i = 0; i < st.particles.length; i++) {
+        const p = st.particles[i];
+        if (p.life > 0) {
+           activeParticles.push(p);
+           ctx.fillStyle = p.color;
+           ctx.globalAlpha = Math.max(0, p.life / p.maxLife);
+           ctx.beginPath(); 
+           ctx.arc(p.x, p.y, Math.max(1, (p.life / p.maxLife) * 6), 0, Math.PI*2); 
+           ctx.fill();
+        }
+      }
+      st.particles = activeParticles;
+      
       ctx.globalAlpha = 1.0;
+      ctx.globalCompositeOperation = 'source-over';
 
       // Hoop
       const hhX = st.hoopX, hhY = st.hoopY;
@@ -645,131 +804,65 @@ export default function TrickshotGame() {
 
   return (
     <div ref={containerRef} className="relative w-full h-screen bg-slate-50 text-slate-800 font-sans overflow-hidden select-none">
+      
+      {/* PSYCHEDELIA BACKGROUND LAYER */}
+      <div className="absolute inset-0 z-0 overflow-hidden pointer-events-none">
+          <div 
+             ref={bgEffectRef} 
+             className="absolute -inset-[100%] pointer-events-none mix-blend-color-dodge opacity-0 origin-center will-change-transform"
+             style={{
+                background: 'conic-gradient(from 0deg, #ff00a0, #00ffff, #ff00a0, #00ffff, #ff00a0)',
+             }}
+          />
+      </div>
+      
       <canvas 
         ref={canvasRef} 
         className="block touch-none relative z-10"
       />
       
-      {/* Top Left: Scoring System */}
+      {/* Top Left: Scoring System (Minimalist) */}
       <div className="absolute top-6 left-6 flex gap-4 z-20 pointer-events-none">
-        <div className="bg-white/80 border border-slate-200 backdrop-blur-md rounded-lg p-4 w-40 shadow-sm">
-          <div className="text-[10px] uppercase tracking-widest text-slate-400 font-bold mb-1">Current Score</div>
-          <div className="text-4xl font-black text-slate-900 tabular-nums tracking-tighter shadow-sky-400">
+        <div className="flex flex-col drop-shadow-md">
+          <div className="text-[10px] uppercase tracking-widest text-slate-500 font-bold mb-0">Score</div>
+          <div className="text-3xl font-black text-slate-800 tabular-nums tracking-tighter leading-none">
             {score}
           </div>
         </div>
-        <div className="bg-white/80 border border-slate-200 backdrop-blur-md rounded-lg p-4 w-32 flex flex-col justify-between hidden md:flex shadow-sm">
-          <div className="text-[10px] uppercase tracking-widest text-orange-400 font-bold mb-1">Multiplier</div>
-          <div className="text-4xl font-black text-orange-500 tabular-nums tracking-tighter leading-none">x{streak}</div>
-        </div>
-        <div className="bg-white/80 border border-slate-200 backdrop-blur-md rounded-lg p-4 w-32 flex flex-col justify-between hidden md:flex shadow-sm">
-          <div className="text-[10px] uppercase tracking-widest text-cyan-400 font-bold mb-1">Pulses</div>
-          <div className="text-4xl font-black text-cyan-500 tabular-nums tracking-tighter leading-none">{pulses}</div>
-        </div>
-      </div>
-
-      {/* Top Right: Environment Telemetry */}
-      <div className="absolute top-6 right-6 flex flex-col gap-2 z-20 pointer-events-none">
-        <div className="bg-white/90 border border-slate-200 backdrop-blur-md rounded-lg p-3 w-48 shadow-sm">
-          <div className="text-[9px] uppercase tracking-widest text-slate-400 font-bold mb-2">Stability Matrix</div>
-          <div className="flex flex-col gap-1.5">
-            <div className="flex justify-between items-center">
-              <span className="text-[10px] text-slate-500">VEL-X</span>
-              <span ref={velxRef} className="text-[11px] font-mono text-slate-800">+0.0 m/s</span>
-            </div>
-            <div className="flex justify-between items-center">
-              <span className="text-[10px] text-slate-500">VEL-Y</span>
-              <span ref={velyRef} className="text-[11px] font-mono text-slate-800">0.0 m/s</span>
-            </div>
-            <div className="flex justify-between items-center">
-              <span className="text-[10px] text-slate-500">STABILITY</span>
-              <span ref={stabilityRef} className="text-[11px] font-mono text-slate-800 font-bold">100%</span>
-            </div>
-          </div>
-        </div>
-        <div className="bg-slate-100 border border-slate-200 backdrop-blur-md rounded-lg px-3 py-2 flex items-center justify-between shadow-sm">
-          <span className="text-[9px] text-slate-500 font-bold tracking-widest uppercase">Target State</span>
-          <span className="text-[10px] text-slate-800 flex items-center gap-1.5 font-bold">
-            <span id="target-state-dot" className="w-2 h-2 rounded-full bg-cyan-400 shadow-sm"></span>
-            <span ref={hoopStateRef}>FLOATING</span>
-          </span>
-        </div>
-      </div>
-
-      {/* Bottom Controls & Gauge */}
-      <div className="absolute bottom-8 left-0 right-0 flex flex-col items-center z-20 pointer-events-none">
-        <div className="w-full max-w-xl px-12">
-          <div className="flex justify-between items-end mb-2">
-            <div>
-              <div className="text-[10px] text-slate-400 font-bold uppercase tracking-widest mb-1">Apex Synchronization</div>
-              <div ref={apexStateRef} className="text-xs text-amber-500 font-mono italic font-bold">ARC PEAK DETECTED</div>
-            </div>
-            <div id="apex-pct-label" className="text-right font-mono text-2xl text-amber-500 font-bold">0%</div>
-          </div>
-          {/* Main Gauge */}
-          <div className="h-4 w-full bg-slate-200 rounded-full p-1 border border-slate-300 shadow-inner">
-            <div ref={apexBarRef} className="h-full rounded-full bg-gradient-to-r from-cyan-400 via-amber-400 to-amber-500 shadow-sm transition-[width,background-color] ease-out" style={{ width: '0%', backgroundColor: '#06b6d4' }}></div>
-          </div>
-        </div>
-
-        <div className="hidden md:flex gap-12 mt-8">
-          <div className="flex flex-col items-center">
-            <kbd className="bg-white border border-slate-200 shadow-sm rounded px-2 py-1 text-xs font-bold text-slate-600 font-sans">SPACE</kbd>
-            <span className="text-[9px] uppercase tracking-tighter mt-1 text-slate-400 font-bold">TRICK JUMP (AT APEX)</span>
-          </div>
-          <div className="flex flex-col items-center">
-            <kbd className="bg-white border border-slate-200 shadow-sm rounded px-2 py-1 text-xs font-bold text-slate-600 font-sans">WASD</kbd>
-            <span className="text-[9px] uppercase tracking-tighter mt-1 text-slate-400 font-bold">VECTOR SHIFT</span>
-          </div>
-          <div className="flex flex-col items-center">
-            <kbd className="bg-white border border-slate-200 shadow-sm rounded px-2 py-1 text-xs font-bold text-slate-600 font-sans">S (PRESS)</kbd>
-            <span className="text-[9px] uppercase tracking-tighter mt-1 text-slate-400 font-bold">METEOR STOMP/DASH</span>
-          </div>
-          <div className="flex flex-col items-center">
-            <kbd className="bg-white border border-slate-200 shadow-sm rounded px-2 py-1 text-xs font-bold text-slate-600 font-sans">DRAG DRAW</kbd>
-            <span className="text-[9px] uppercase tracking-tighter mt-1 text-slate-400 font-bold">CREATE TRAMPOLINE</span>
+        <div className="flex flex-col drop-shadow-md ml-4">
+          <div className="text-[10px] uppercase tracking-widest text-orange-500 font-bold mb-0">Multiplier</div>
+          <div className="text-3xl font-black text-orange-500 tabular-nums tracking-tighter leading-none">
+            x{streak}
           </div>
         </div>
       </div>
 
-      {/* Corner Decoration / Telemetry */}
-      <div className="absolute bottom-6 left-6 font-mono text-[10px] text-slate-400 z-20 pointer-events-none hidden md:block">
-        PHYSICS_RUNTIME: MATTER_0.19<br/>
-        ENGINE_STATE: HIGH_PRECISION<br/>
-        BUFFER: 0ms
-      </div>
-      <div className="absolute bottom-6 right-6 text-right font-mono text-[10px] text-slate-400 z-20 pointer-events-none hidden md:block">
-        SYNC_FREQ: 60Hz<br/>
-        LATENCY: 1.2ms<br/>
-        INST_REFLEX: 150ms
-      </div>
-
-      {/* NOTIFICATIONS OVERLAY */}
-      <div className="absolute top-[40%] left-1/2 -translate-x-1/2 -translate-y-1/2 flex flex-col items-center pointer-events-none w-full z-50">
+      {/* NOTIFICATIONS OVERLAY (Right Side, Brief) */}
+      <div className="absolute top-[20%] right-12 flex flex-col items-end pointer-events-none w-64 z-50">
         <AnimatePresence>
           {notifications.map((notif) => (
             <motion.div 
               key={notif.id}
-              initial={{ scale: 0.8, opacity: 0, y: 10 }}
-              animate={{ scale: 1, opacity: 1, y: 0 }}
-              exit={{ scale: 1.05, opacity: 0, filter: 'blur(5px)' }}
-              transition={{ type: "spring", stiffness: 400, damping: 25 }}
-              className="text-center absolute w-full"
+              initial={{ opacity: 0, x: 50, skewX: -15 }}
+              animate={{ opacity: 1, x: 0, skewX: 0 }}
+              exit={{ opacity: 0, x: 20, filter: 'blur(4px)' }}
+              transition={{ type: "spring", stiffness: 500, damping: 30 }}
+              className="text-right w-full mb-2"
             >
               <div 
-                className="text-5xl md:text-6xl font-black italic tracking-tighter uppercase"
+                className="text-3xl md:text-4xl font-black italic tracking-tighter uppercase"
                 style={{ 
                   color: notif.color,
-                  textShadow: `0 4px 20px ${notif.color}40`
+                  textShadow: `0 2px 10px ${notif.color}60`
                 }}
               >
                 {notif.title}
               </div>
-              <div 
-                className="text-xs md:text-sm tracking-[0.4em] font-bold mt-2 text-slate-600"
-              >
-                {notif.subtitle}
-              </div>
+              {notif.subtitle && (
+                <div className="text-xs tracking-widest font-bold text-slate-600 drop-shadow-sm uppercase">
+                  {notif.subtitle}
+                </div>
+              )}
             </motion.div>
           ))}
         </AnimatePresence>
@@ -785,7 +878,7 @@ export default function TrickshotGame() {
             transition={{ duration: 0.3 }}
             className="absolute inset-0 pointer-events-none z-10"
             style={{
-              background: 'radial-gradient(ellipse at center, rgba(16, 185, 129, 0.4) 0%, transparent 60%)'
+              background: 'radial-gradient(ellipse at center, rgba(16, 185, 129, 0.2) 0%, transparent 60%)'
             }}
           />
         )}
