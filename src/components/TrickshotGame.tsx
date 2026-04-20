@@ -60,7 +60,11 @@ export default function TrickshotGame() {
     isDrawing: false,
     drawStartX: 0, drawStartY: 0, drawCurrX: 0, drawCurrY: 0,
     customBodies: [] as Matter.Body[],
-    particles: [] as {x: number, y: number, vx: number, vy: number, life: number, maxLife: number, color: string}[]
+    particles: [] as {x: number, y: number, vx: number, vy: number, life: number, maxLife: number, color: string}[],
+    chainCount: 0,
+    downHoldDuration: 0,
+    timeScale: 1.0,
+    isSlowMo: false
   });
 
   const showNotif = (title: string, subtitle: string, color: string) => {
@@ -85,8 +89,8 @@ export default function TrickshotGame() {
     canvasRef.current.width = W;
     canvasRef.current.height = H;
 
-    const engine = Engine.create({ gravity: { x: 0, y: 1.8, scale: 0.001 } });
-    engine.gravity.y = 1.8;
+    const engine = Engine.create({ gravity: { x: 0, y: 3.5, scale: 0.001 } });
+    engine.gravity.y = 3.5;
     const world = engine.world;
     
     // Create bodies
@@ -105,13 +109,19 @@ export default function TrickshotGame() {
     const wallR = Bodies.rectangle(W+25, -H*4, 50, H*10, { isStatic: true, label: 'surface', restitution: 0.9 });
     const ceiling = Bodies.rectangle(W/2, -H*4 - 25, W*10, 50, { isStatic: true, label: 'surface', restitution: 0.9 });
     
+    // Static Trick Ramps
+    const rampL = Bodies.rectangle(W * 0.1, H * 0.7, 500, 30, { isStatic: true, angle: -Math.PI / 8, label: 'surface', restitution: 0.8 });
+    const rampR = Bodies.rectangle(W * 0.9, H * 0.5, 400, 30, { isStatic: true, angle: Math.PI / 6, label: 'surface', restitution: 0.8 });
+    const rampM = Bodies.rectangle(W * 0.5, H * 0.2, 300, 20, { isStatic: true, angle: 0, label: 'surface', restitution: 0.8 });
+    stateRef.current.customBodies.push(rampL, rampR, rampM);
+
     const hoopSensor = Bodies.circle(stateRef.current.hoopX, stateRef.current.hoopY, 28, { 
       isSensor: true, 
       isStatic: true, 
       label: 'hoop' 
     });
 
-    World.add(world, [ball, ground, wallL, wallR, ceiling, hoopSensor]);
+    World.add(world, [ball, ground, wallL, wallR, ceiling, hoopSensor, rampL, rampR, rampM]);
 
     const triggerShake = (amount: number) => {
       stateRef.current.shakeX = (Math.random()-0.5) * amount * 2;
@@ -149,6 +159,7 @@ export default function TrickshotGame() {
         const isBouncy = bodyA.label === 'bouncy_pad' || bodyB.label === 'bouncy_pad';
         if (isBall && (isSurface || isBouncy)) {
           stateRef.current.lastSurfaceContact = Date.now();
+          stateRef.current.chainCount = 0;
           const vel = Math.sqrt(ball.velocity.x**2 + ball.velocity.y**2);
           const color = isBouncy ? '#f43f5e' : '#94a3b8';
           const intensity = isBouncy ? 0.6 : 0.4;
@@ -176,40 +187,57 @@ export default function TrickshotGame() {
     };
 
     const doPulse = () => {
-      stateRef.current.pulses++;
-      setPulses(stateRef.current.pulses);
+      const st = stateRef.current;
+      const currentScale = engine.timing.timeScale || 1;
+      const vx = ball.velocity.x / currentScale;
+      const vy = ball.velocity.y / currentScale;
       
-      const { x: vx, y: vy } = ball.velocity;
-      const sinceContact = Date.now() - stateRef.current.lastSurfaceContact;
-      const keys = stateRef.current.keys;
+      const sinceContact = Date.now() - st.lastSurfaceContact;
+      const absVY = Math.abs(vy);
 
-      if (stateRef.current.apexActive) {
-        let dx = 0, dy = 0;
-        if (keys['KeyW'] || keys['ArrowUp']) dy -= 1;
-        if (keys['KeyS'] || keys['ArrowDown']) dy += 1;
-        if (keys['KeyA'] || keys['ArrowLeft']) dx -= 1;
-        if (keys['KeyD'] || keys['ArrowRight']) dx += 1;
-        
-        const len = Math.sqrt(dx*dx + dy*dy) || 1;
-        if (dx !== 0 || dy !== 0) {
-          Body.setVelocity(ball, { x: vx * 0.2 + (dx/len) * 22, y: vy * 0.2 + (dy/len) * 22 - 8 });
-          triggerShake(14);
-          showNotif('APEX SURGE', '3.5× DIRECTIONAL BOOST', '#ff8800');
-          stateRef.current.apexGauge = 0;
-          stateRef.current.apexActive = false;
-          return;
-        }
-      }
+      const strictThreshold = Math.max(0.5, 3.5 - (st.chainCount || 0) * 0.5);
 
-      let mult = 1;
+      // Instant snap out to prevent scaling bugs immediately on action
+      st.timeScale = 1.0;
+      engine.timing.timeScale = 1.0;
+      st.isSlowMo = false;
+
+      // 1. Ground Jump
       if (sinceContact < 150) {
-        mult = 2;
-        triggerShake(7);
-        showNotif('REFLEX BONUS', '2× MOMENTUM BOOST', '#00aaff');
+        st.pulses++;
+        setPulses(st.pulses);
+        st.chainCount = 0;
+        triggerShake(5);
+        Body.setVelocity(ball, { x: vx, y: -20 });
+        return;
       }
 
-      // Snappy and predictable velocity instead of unpredictable massive applyForce
-      Body.setVelocity(ball, { x: vx * 0.8, y: Math.min(vy, 0) - 14 * mult });
+      // 2. Air Jump (Hangtime Dilation Window)
+      if (vy > -12 && vy <= strictThreshold + 2.5) { 
+        st.pulses++;
+        setPulses(st.pulses);
+        
+        if (absVY <= strictThreshold) {
+          // PERFECT
+          st.chainCount++;
+          triggerShake(12 + st.chainCount * 2);
+          showNotif(`TRICK x${st.chainCount}`, 'PERFECT APEX!', '#fbbf24');
+          
+          const extraH = st.keys['KeyD'] || st.keys['ArrowRight'] ? 6 : 
+                         (st.keys['KeyA'] || st.keys['ArrowLeft'] ? -6 : 0);
+                         
+          Body.setVelocity(ball, { x: vx + extraH, y: -20 - (st.chainCount * 2.5) });
+        } else {
+          // WEAK
+          st.chainCount = 0;
+          triggerShake(3);
+          const diff = (absVY - strictThreshold).toFixed(1);
+          showNotif('WEAK', `OFF BY ${diff}m/s`, '#94a3b8');
+          Body.setVelocity(ball, { x: vx, y: -12 });
+        }
+      } else {
+        showNotif('MISSED', 'NOT IN FOCUS ZONE', '#ef4444');
+      }
     };
 
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -344,18 +372,59 @@ export default function TrickshotGame() {
       accumulator += dt;
 
       const st = stateRef.current;
+      
+      const currentScale = engine.timing.timeScale || 1;
+      const realVy = ball.velocity.y / currentScale;
+      const realVx = ball.velocity.x / currentScale;
+
+      let timeScaleTarget = 1.0;
+      const strictThreshold = Math.max(0.5, 3.5 - (st.chainCount || 0) * 0.5);
+      const isAirborne = (Date.now() - st.lastSurfaceContact) > 150;
+      
+      // Apex Time Dilation (Bullet Time)
+      if (isAirborne && realVy > -12 && realVy < strictThreshold + 3) {
+         timeScaleTarget = Math.max(0.05, 0.3 - (st.chainCount * 0.03)); 
+         st.isSlowMo = true;
+      } else {
+         st.isSlowMo = false;
+      }
+      
+      st.timeScale += (timeScaleTarget - st.timeScale) * 0.15;
+      
+      if (timeScaleTarget === 1.0 && st.timeScale < 0.5 && realVy < -15) {
+         st.timeScale = 1.0; // Snap out
+      }
+      
+      engine.timing.timeScale = st.timeScale;
 
       while (accumulator >= timeStep) {
+        const sinceContact = Date.now() - st.lastSurfaceContact;
+        const _isAirborne = Math.abs(realVy) > 0.5 && sinceContact > 150;
+        const isDown = st.keys['KeyS'] || st.keys['ArrowDown'];
+
+        // Vertical Progressive Fast Fall
+        if (_isAirborne && isDown) {
+          st.downHoldDuration += timeStep;
+          // Base force 1G, progressive up to ~6G over 1 second
+          const downForce = 0.003 + (st.downHoldDuration * 0.00002);
+          Body.applyForce(ball, ball.position, { x: 0, y: downForce * ball.mass });
+        } else {
+          st.downHoldDuration = 0;
+        }
+
         // Horizontal Control (always active)
         let dx = 0;
         if (st.keys['KeyA'] || st.keys['ArrowLeft']) dx -= 1;
         if (st.keys['KeyD'] || st.keys['ArrowRight']) dx += 1;
         
         if (dx !== 0) {
-          const sinceContact = Date.now() - st.lastSurfaceContact;
-          const isAirborne = Math.abs(ball.velocity.y) > 0.5 && sinceContact > 150;
-          // Different horizontal force rate: much stronger in air
-          const speedFactor = isAirborne ? 0.0006 : 0.0001; 
+          let speedFactor = 0;
+          if (_isAirborne) {
+            speedFactor = 0.0006;
+          } else {
+            // Ground Dash: significantly faster if holding Down
+            speedFactor = isDown ? 0.0005 : 0.0001;
+          }
           Body.applyForce(ball, ball.position, { x: dx * speedFactor * ball.mass, y: 0 });
         }
 
@@ -372,13 +441,16 @@ export default function TrickshotGame() {
       }
 
       // Update Apex Gauge
-      const absVY = Math.abs(ball.velocity.y);
-      if (absVY < 4 && ball.velocity.y < 2) st.apexGauge = Math.min(1, st.apexGauge + (1 - absVY/4) * 0.08);
-      else st.apexGauge = Math.max(0, st.apexGauge - 0.04);
-      st.apexActive = absVY < 1.2 && st.apexGauge > 0.7;
+      const absVY = Math.abs(realVy);
+      if (absVY < strictThreshold + 3) {
+         st.apexGauge = Math.min(1, st.apexGauge + 0.1);
+      } else {
+         st.apexGauge = Math.max(0, st.apexGauge - 0.05);
+      }
+      st.apexActive = absVY <= strictThreshold;
       
       // Update Trail
-      const spd = Math.sqrt(ball.velocity.x**2 + ball.velocity.y**2);
+      const spd = Math.sqrt(realVx**2 + realVy**2);
       st.trailPoints.unshift({ x: ball.position.x, y: ball.position.y, s: spd });
       const maxLen = Math.floor(Math.min(spd * 3, 30));
       if (st.trailPoints.length > maxLen + 1) st.trailPoints.length = maxLen + 1;
@@ -393,17 +465,29 @@ export default function TrickshotGame() {
       }
 
       // Fast DOM Updates
-      if (velyRef.current) velyRef.current.textContent = ball.velocity.y.toFixed(1);
-      if (velxRef.current) velxRef.current.textContent = ball.velocity.x.toFixed(1);
+      const dimmer = document.getElementById('bg-dimmer');
+      if (dimmer) {
+        dimmer.style.opacity = st.isSlowMo ? '1' : '0';
+      }
+
+      if (velyRef.current) velyRef.current.textContent = realVy.toFixed(1);
+      if (velxRef.current) velxRef.current.textContent = realVx.toFixed(1);
       if (stabilityRef.current) stabilityRef.current.textContent = Math.max(0, Math.round(100 - spd * 2)) + '%';
       if (apexBarRef.current) {
-        apexBarRef.current.style.width = `${st.apexGauge * 100}%`;
-        apexBarRef.current.style.background = st.apexActive ? '#ffa500' : '#00aaff';
-        apexBarRef.current.style.boxShadow = st.apexActive ? '0 0 10px #ffa500' : 'none';
+        apexBarRef.current.style.width = `${Math.min(100, st.apexGauge * 100)}%`;
+        const color = st.apexActive ? '#fbbf24' : (st.chainCount > 0 ? '#f87171' : '#0ea5e9');
+        apexBarRef.current.style.background = color;
+        apexBarRef.current.style.boxShadow = st.apexActive ? `0 0 10px ${color}` : 'none';
       }
       if (apexStateRef.current) {
-        apexStateRef.current.textContent = st.apexActive ? '⬡ GOLD' : (ball.velocity.y < 0 ? 'RISING' : 'FALLING');
-        apexStateRef.current.style.color = st.apexActive ? '#ffa500' : '#4b5563';
+        if (st.isSlowMo) {
+           const inZone = Math.abs(realVy) <= strictThreshold;
+           apexStateRef.current.textContent = inZone ? `[ PERFECT APEX READY ]` : `FOCUS: CHAIN ${st.chainCount || 0} (±${strictThreshold.toFixed(1)}m/s)`;
+           apexStateRef.current.style.color = inZone ? '#fbbf24' : '#0ea5e9';
+        } else {
+           apexStateRef.current.textContent = 'AWAITING PEAK...';
+           apexStateRef.current.style.color = '#94a3b8';
+        }
       }
       if (hoopStateRef.current) {
         hoopStateRef.current.textContent = st.dragTarget ? 'DRAGGING' : 'FLOATING';
@@ -462,14 +546,14 @@ export default function TrickshotGame() {
         }
       }
 
-      // Draw custom bouncy pads
+      // Draw custom bouncy pads and ramps
       st.customBodies.forEach(b => {
-        if (b.label === 'bouncy_pad') {
+        if (b.label === 'bouncy_pad' || b.label === 'surface') {
            ctx.beginPath();
            ctx.moveTo(b.vertices[0].x, b.vertices[0].y);
            for(let j=1; j<b.vertices.length; j++) ctx.lineTo(b.vertices[j].x, b.vertices[j].y);
            ctx.closePath();
-           ctx.fillStyle = '#f43f5e'; // rose-500
+           ctx.fillStyle = b.label === 'bouncy_pad' ? '#f43f5e' : '#cbd5e1'; 
            ctx.fill();
         }
       });
@@ -490,9 +574,10 @@ export default function TrickshotGame() {
       // Particles
       for(let i=st.particles.length-1; i>=0; i--) {
         const p = st.particles[i];
-        p.x += p.vx; p.y += p.vy;
-        p.vy += 0.5; // gravity
-        p.life -= 0.03;
+        p.x += p.vx * st.timeScale; 
+        p.y += p.vy * st.timeScale;
+        p.vy += 0.5 * st.timeScale; // gravity
+        p.life -= 0.03 * st.timeScale;
         if (p.life <= 0) { st.particles.splice(i, 1); continue; }
         ctx.fillStyle = p.color;
         ctx.globalAlpha = p.life / p.maxLife;
@@ -573,6 +658,7 @@ export default function TrickshotGame() {
 
   return (
     <div ref={containerRef} className="relative w-full h-screen bg-slate-50 text-slate-800 font-sans overflow-hidden select-none">
+      <div id="bg-dimmer" className="absolute inset-0 pointer-events-none z-10 transition-opacity duration-150 ease-out" style={{ backgroundColor: 'rgba(14, 165, 233, 0.06)', backdropFilter: 'sepia(40%) saturate(150%) blur(1px)', opacity: 0 }} />
       <canvas 
         ref={canvasRef} 
         className="block touch-none relative z-10"
@@ -643,11 +729,15 @@ export default function TrickshotGame() {
         <div className="hidden md:flex gap-12 mt-8">
           <div className="flex flex-col items-center">
             <kbd className="bg-white border border-slate-200 shadow-sm rounded px-2 py-1 text-xs font-bold text-slate-600 font-sans">SPACE</kbd>
-            <span className="text-[9px] uppercase tracking-tighter mt-1 text-slate-400 font-bold">AERIAL PULSE</span>
+            <span className="text-[9px] uppercase tracking-tighter mt-1 text-slate-400 font-bold">TRICK JUMP (AT APEX)</span>
           </div>
           <div className="flex flex-col items-center">
             <kbd className="bg-white border border-slate-200 shadow-sm rounded px-2 py-1 text-xs font-bold text-slate-600 font-sans">WASD</kbd>
             <span className="text-[9px] uppercase tracking-tighter mt-1 text-slate-400 font-bold">VECTOR SHIFT</span>
+          </div>
+          <div className="flex flex-col items-center">
+            <kbd className="bg-white border border-slate-200 shadow-sm rounded px-2 py-1 text-xs font-bold text-slate-600 font-sans">S (HOLD)</kbd>
+            <span className="text-[9px] uppercase tracking-tighter mt-1 text-slate-400 font-bold">FAST FALL / DASH</span>
           </div>
           <div className="flex flex-col items-center">
             <kbd className="bg-white border border-slate-200 shadow-sm rounded px-2 py-1 text-xs font-bold text-slate-600 font-sans">DRAG DRAW</kbd>
