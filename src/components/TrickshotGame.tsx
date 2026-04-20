@@ -62,9 +62,7 @@ export default function TrickshotGame() {
     customBodies: [] as Matter.Body[],
     particles: [] as {x: number, y: number, vx: number, vy: number, life: number, maxLife: number, color: string}[],
     chainCount: 0,
-    downHoldDuration: 0,
-    timeScale: 1.0,
-    isSlowMo: false
+    hasAirPulse: true
   });
 
   const showNotif = (title: string, subtitle: string, color: string) => {
@@ -89,8 +87,8 @@ export default function TrickshotGame() {
     canvasRef.current.width = W;
     canvasRef.current.height = H;
 
-    const engine = Engine.create({ gravity: { x: 0, y: 3.5, scale: 0.001 } });
-    engine.gravity.y = 3.5;
+    const engine = Engine.create({ gravity: { x: 0, y: 2.5, scale: 0.001 } });
+    engine.gravity.y = 2.5;
     const world = engine.world;
     
     // Create bodies
@@ -160,6 +158,7 @@ export default function TrickshotGame() {
         if (isBall && (isSurface || isBouncy)) {
           stateRef.current.lastSurfaceContact = Date.now();
           stateRef.current.chainCount = 0;
+          stateRef.current.hasAirPulse = true;
           const vel = Math.sqrt(ball.velocity.x**2 + ball.velocity.y**2);
           const color = isBouncy ? '#f43f5e' : '#94a3b8';
           const intensity = isBouncy ? 0.6 : 0.4;
@@ -188,64 +187,99 @@ export default function TrickshotGame() {
 
     const doPulse = () => {
       const st = stateRef.current;
-      const currentScale = engine.timing.timeScale || 1;
-      const vx = ball.velocity.x / currentScale;
-      const vy = ball.velocity.y / currentScale;
-      
+      const { x: vx, y: vy } = ball.velocity;
       const sinceContact = Date.now() - st.lastSurfaceContact;
       const absVY = Math.abs(vy);
-
-      const strictThreshold = Math.max(0.5, 3.5 - (st.chainCount || 0) * 0.5);
-
-      // Instant snap out to prevent scaling bugs immediately on action
-      st.timeScale = 1.0;
-      engine.timing.timeScale = 1.0;
-      st.isSlowMo = false;
 
       // 1. Ground Jump
       if (sinceContact < 150) {
         st.pulses++;
         setPulses(st.pulses);
         st.chainCount = 0;
+        st.hasAirPulse = true;
         triggerShake(5);
-        Body.setVelocity(ball, { x: vx, y: -20 });
+        Body.setVelocity(ball, { x: vx, y: -22 });
         return;
       }
 
-      // 2. Air Jump (Hangtime Dilation Window)
-      if (vy > -12 && vy <= strictThreshold + 2.5) { 
-        st.pulses++;
-        setPulses(st.pulses);
+      // 2. Air Jump
+      if (!st.hasAirPulse) {
+        showNotif('EXHAUSTED', 'TOUCH GROUND TO RESET', '#64748b');
+        return;
+      }
+
+      st.pulses++;
+      setPulses(st.pulses);
+      
+      const isPerfect = absVY <= 1.5;
+
+      if (isPerfect) {
+        // PERFECT APEX - Refund the pulse!
+        st.chainCount++;
+        st.hasAirPulse = true; 
         
-        if (absVY <= strictThreshold) {
-          // PERFECT
-          st.chainCount++;
-          triggerShake(12 + st.chainCount * 2);
-          showNotif(`TRICK x${st.chainCount}`, 'PERFECT APEX!', '#fbbf24');
-          
-          const extraH = st.keys['KeyD'] || st.keys['ArrowRight'] ? 6 : 
-                         (st.keys['KeyA'] || st.keys['ArrowLeft'] ? -6 : 0);
-                         
-          Body.setVelocity(ball, { x: vx + extraH, y: -20 - (st.chainCount * 2.5) });
-        } else {
-          // WEAK
-          st.chainCount = 0;
-          triggerShake(3);
-          const diff = (absVY - strictThreshold).toFixed(1);
-          showNotif('WEAK', `OFF BY ${diff}m/s`, '#94a3b8');
-          Body.setVelocity(ball, { x: vx, y: -12 });
+        triggerShake(15 + st.chainCount * 3);
+        showNotif(`PERFECT x${st.chainCount}`, 'APEX SHATTER!', '#fbbf24');
+        
+        // Explosion particles
+        for(let i=0; i<30; i++) {
+           st.particles.push({
+             x: ball.position.x, y: ball.position.y,
+             vx: (Math.random()-0.5)*20, vy: (Math.random()-0.5)*20,
+             life: 1, maxLife: 1, color: '#fbbf24'
+           });
         }
+
+        const extraH = st.keys['KeyD'] || st.keys['ArrowRight'] ? 8 : 
+                       (st.keys['KeyA'] || st.keys['ArrowLeft'] ? -8 : 0);
+                       
+        Body.setVelocity(ball, { x: vx + extraH, y: -26 - (st.chainCount * 3) });
       } else {
-        showNotif('MISSED', 'NOT IN FOCUS ZONE', '#ef4444');
+        // WEAK JUMP - Expend the pulse
+        st.chainCount = 0;
+        st.hasAirPulse = false;
+        triggerShake(4);
+        showNotif('AIR JUMP', 'CHAIN BROKEN', '#94a3b8');
+        Body.setVelocity(ball, { x: vx, y: -16 });
       }
     };
 
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.repeat) return; // Ignore hold repeats for action triggers
       stateRef.current.keys[e.code] = true;
+      
       if (e.code === 'Space') { 
         e.preventDefault(); 
         doPulse(); 
       }
+      
+      // STOMP / DASH Mechanics
+      if (e.code === 'KeyS' || e.code === 'ArrowDown') {
+         const st = stateRef.current;
+         const sinceContact = Date.now() - st.lastSurfaceContact;
+         if (sinceContact > 150) {
+            // METEOR STOMP
+            Body.setVelocity(ball, { x: ball.velocity.x * 0.3, y: 35 });
+            triggerShake(15);
+            showNotif('STOMP', 'METEOR CRASH', '#f43f5e');
+            for(let i=0; i<15; i++) {
+               st.particles.push({
+                 x: ball.position.x, y: ball.position.y,
+                 vx: (Math.random()-0.5)*12, vy: -5 - Math.random()*15,
+                 life: 1, maxLife: 1, color: '#f43f5e'
+               });
+            }
+         } else {
+            // GROUND DASH
+            const dx = st.keys['KeyD'] || st.keys['ArrowRight'] ? 1 : (st.keys['KeyA'] || st.keys['ArrowLeft'] ? -1 : 0);
+            if (dx !== 0) {
+               Body.setVelocity(ball, { x: dx * 35, y: ball.velocity.y });
+               triggerShake(8);
+               showNotif('DASH', 'GROUND BOOST', '#10b981');
+            }
+         }
+      }
+      
       if (e.code === 'KeyR') resetBall();
     };
 
@@ -372,59 +406,18 @@ export default function TrickshotGame() {
       accumulator += dt;
 
       const st = stateRef.current;
-      
-      const currentScale = engine.timing.timeScale || 1;
-      const realVy = ball.velocity.y / currentScale;
-      const realVx = ball.velocity.x / currentScale;
-
-      let timeScaleTarget = 1.0;
-      const strictThreshold = Math.max(0.5, 3.5 - (st.chainCount || 0) * 0.5);
-      const isAirborne = (Date.now() - st.lastSurfaceContact) > 150;
-      
-      // Apex Time Dilation (Bullet Time)
-      if (isAirborne && realVy > -12 && realVy < strictThreshold + 3) {
-         timeScaleTarget = Math.max(0.05, 0.3 - (st.chainCount * 0.03)); 
-         st.isSlowMo = true;
-      } else {
-         st.isSlowMo = false;
-      }
-      
-      st.timeScale += (timeScaleTarget - st.timeScale) * 0.15;
-      
-      if (timeScaleTarget === 1.0 && st.timeScale < 0.5 && realVy < -15) {
-         st.timeScale = 1.0; // Snap out
-      }
-      
-      engine.timing.timeScale = st.timeScale;
 
       while (accumulator >= timeStep) {
         const sinceContact = Date.now() - st.lastSurfaceContact;
-        const _isAirborne = Math.abs(realVy) > 0.5 && sinceContact > 150;
-        const isDown = st.keys['KeyS'] || st.keys['ArrowDown'];
-
-        // Vertical Progressive Fast Fall
-        if (_isAirborne && isDown) {
-          st.downHoldDuration += timeStep;
-          // Base force 1G, progressive up to ~6G over 1 second
-          const downForce = 0.003 + (st.downHoldDuration * 0.00002);
-          Body.applyForce(ball, ball.position, { x: 0, y: downForce * ball.mass });
-        } else {
-          st.downHoldDuration = 0;
-        }
-
-        // Horizontal Control (always active)
+        const isAirborne = Math.abs(ball.velocity.y) > 0.5 && sinceContact > 150;
+        
+        // Horizontal Control (always active but weaker than dash)
         let dx = 0;
         if (st.keys['KeyA'] || st.keys['ArrowLeft']) dx -= 1;
         if (st.keys['KeyD'] || st.keys['ArrowRight']) dx += 1;
         
         if (dx !== 0) {
-          let speedFactor = 0;
-          if (_isAirborne) {
-            speedFactor = 0.0006;
-          } else {
-            // Ground Dash: significantly faster if holding Down
-            speedFactor = isDown ? 0.0005 : 0.0001;
-          }
+          const speedFactor = isAirborne ? 0.0006 : 0.0002;
           Body.applyForce(ball, ball.position, { x: dx * speedFactor * ball.mass, y: 0 });
         }
 
@@ -441,16 +434,13 @@ export default function TrickshotGame() {
       }
 
       // Update Apex Gauge
-      const absVY = Math.abs(realVy);
-      if (absVY < strictThreshold + 3) {
-         st.apexGauge = Math.min(1, st.apexGauge + 0.1);
-      } else {
-         st.apexGauge = Math.max(0, st.apexGauge - 0.05);
-      }
-      st.apexActive = absVY <= strictThreshold;
+      const absVY = Math.abs(ball.velocity.y);
+      st.apexActive = absVY <= 1.5;
+      if (st.apexActive) st.apexGauge = 1;
+      else st.apexGauge = Math.max(0, 1 - (absVY / 10));
       
       // Update Trail
-      const spd = Math.sqrt(realVx**2 + realVy**2);
+      const spd = Math.sqrt(ball.velocity.x**2 + ball.velocity.y**2);
       st.trailPoints.unshift({ x: ball.position.x, y: ball.position.y, s: spd });
       const maxLen = Math.floor(Math.min(spd * 3, 30));
       if (st.trailPoints.length > maxLen + 1) st.trailPoints.length = maxLen + 1;
@@ -465,25 +455,22 @@ export default function TrickshotGame() {
       }
 
       // Fast DOM Updates
-      const dimmer = document.getElementById('bg-dimmer');
-      if (dimmer) {
-        dimmer.style.opacity = st.isSlowMo ? '1' : '0';
-      }
-
-      if (velyRef.current) velyRef.current.textContent = realVy.toFixed(1);
-      if (velxRef.current) velxRef.current.textContent = realVx.toFixed(1);
+      if (velyRef.current) velyRef.current.textContent = ball.velocity.y.toFixed(1);
+      if (velxRef.current) velxRef.current.textContent = ball.velocity.x.toFixed(1);
       if (stabilityRef.current) stabilityRef.current.textContent = Math.max(0, Math.round(100 - spd * 2)) + '%';
       if (apexBarRef.current) {
         apexBarRef.current.style.width = `${Math.min(100, st.apexGauge * 100)}%`;
-        const color = st.apexActive ? '#fbbf24' : (st.chainCount > 0 ? '#f87171' : '#0ea5e9');
+        const color = st.apexActive ? '#fbbf24' : (!st.hasAirPulse ? '#ef4444' : '#0ea5e9');
         apexBarRef.current.style.background = color;
-        apexBarRef.current.style.boxShadow = st.apexActive ? `0 0 10px ${color}` : 'none';
+        apexBarRef.current.style.boxShadow = st.apexActive ? `0 0 15px ${color}` : 'none';
       }
       if (apexStateRef.current) {
-        if (st.isSlowMo) {
-           const inZone = Math.abs(realVy) <= strictThreshold;
-           apexStateRef.current.textContent = inZone ? `[ PERFECT APEX READY ]` : `FOCUS: CHAIN ${st.chainCount || 0} (±${strictThreshold.toFixed(1)}m/s)`;
-           apexStateRef.current.style.color = inZone ? '#fbbf24' : '#0ea5e9';
+        if (!st.hasAirPulse) {
+           apexStateRef.current.textContent = 'EXHAUSTED (TOUCH GROUND)';
+           apexStateRef.current.style.color = '#ef4444';
+        } else if (st.apexActive) {
+           apexStateRef.current.textContent = `[ PERFECT APEX READY ] (CHAIN: ${st.chainCount})`;
+           apexStateRef.current.style.color = '#fbbf24';
         } else {
            apexStateRef.current.textContent = 'AWAITING PEAK...';
            apexStateRef.current.style.color = '#94a3b8';
@@ -574,10 +561,10 @@ export default function TrickshotGame() {
       // Particles
       for(let i=st.particles.length-1; i>=0; i--) {
         const p = st.particles[i];
-        p.x += p.vx * st.timeScale; 
-        p.y += p.vy * st.timeScale;
-        p.vy += 0.5 * st.timeScale; // gravity
-        p.life -= 0.03 * st.timeScale;
+        p.x += p.vx; 
+        p.y += p.vy;
+        p.vy += 0.5; // gravity
+        p.life -= 0.03;
         if (p.life <= 0) { st.particles.splice(i, 1); continue; }
         ctx.fillStyle = p.color;
         ctx.globalAlpha = p.life / p.maxLife;
@@ -658,7 +645,6 @@ export default function TrickshotGame() {
 
   return (
     <div ref={containerRef} className="relative w-full h-screen bg-slate-50 text-slate-800 font-sans overflow-hidden select-none">
-      <div id="bg-dimmer" className="absolute inset-0 pointer-events-none z-10 transition-opacity duration-150 ease-out" style={{ backgroundColor: 'rgba(14, 165, 233, 0.06)', backdropFilter: 'sepia(40%) saturate(150%) blur(1px)', opacity: 0 }} />
       <canvas 
         ref={canvasRef} 
         className="block touch-none relative z-10"
@@ -736,8 +722,8 @@ export default function TrickshotGame() {
             <span className="text-[9px] uppercase tracking-tighter mt-1 text-slate-400 font-bold">VECTOR SHIFT</span>
           </div>
           <div className="flex flex-col items-center">
-            <kbd className="bg-white border border-slate-200 shadow-sm rounded px-2 py-1 text-xs font-bold text-slate-600 font-sans">S (HOLD)</kbd>
-            <span className="text-[9px] uppercase tracking-tighter mt-1 text-slate-400 font-bold">FAST FALL / DASH</span>
+            <kbd className="bg-white border border-slate-200 shadow-sm rounded px-2 py-1 text-xs font-bold text-slate-600 font-sans">S (PRESS)</kbd>
+            <span className="text-[9px] uppercase tracking-tighter mt-1 text-slate-400 font-bold">METEOR STOMP/DASH</span>
           </div>
           <div className="flex flex-col items-center">
             <kbd className="bg-white border border-slate-200 shadow-sm rounded px-2 py-1 text-xs font-bold text-slate-600 font-sans">DRAG DRAW</kbd>
