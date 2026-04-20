@@ -12,7 +12,7 @@ type Notification = {
   color: string;
 };
 
-export default function TrickshotGame() {
+export default function SandboxGame({ onExit }: { onExit?: () => void }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   
@@ -23,11 +23,9 @@ export default function TrickshotGame() {
   const velyRef = useRef<HTMLSpanElement>(null);
   const velxRef = useRef<HTMLSpanElement>(null);
   const stabilityRef = useRef<HTMLSpanElement>(null);
-  const apexBarRef = useRef<HTMLDivElement>(null);
-  const apexStateRef = useRef<HTMLSpanElement>(null);
-  const hoopStateRef = useRef<HTMLDivElement>(null);
   
   // Game State
+  const [levelType, setLevelType] = useState<'SANDBOX' | 'DOWNHILL_30' | 'DYNAMIC_HILLS' | 'SONIC_PROTOTYPE'>('SANDBOX');
   const [score, setScore] = useState(0);
   const [streak, setStreak] = useState(0);
   const [pulses, setPulses] = useState(0);
@@ -37,9 +35,13 @@ export default function TrickshotGame() {
   // Use refs for internal physics tracking
   const stateRef = useRef({
     score: 0,
-    streak: 0,
+    streak: 1,
+    charge: 0,
+    lastTapTime: 0,
+    lastTapKey: '',
     pulses: 0,
     lastSurfaceContact: -1000,
+    wasAirborne: false,
     apexGauge: 0,
     apexActive: false,
     shakeX: 0,
@@ -48,28 +50,17 @@ export default function TrickshotGame() {
     cameraX: 0,
     cameraY: 0,
     cameraZoom: 1,
-    hoopX: window.innerWidth * 0.65,
-    hoopY: window.innerHeight * 0.38,
-    hoopFloatVY: 0,
-    dragTarget: false,
-    hoopDragOffX: 0,
-    hoopDragOffY: 0,
     keys: {} as Record<string, boolean>,
-    trailPoints: [] as {x: number, y: number, s: number}[],
+    trailPoints: [] as {x: number, y: number, s: number, color?: string}[],
     notifIdCounter: 0,
     isDrawing: false,
     drawStartX: 0, drawStartY: 0, drawCurrX: 0, drawCurrY: 0,
     customBodies: [] as Matter.Body[],
     particles: [] as {x: number, y: number, vx: number, vy: number, life: number, maxLife: number, color: string}[],
     chainCount: 0,
-    hasAirPulse: true,
-    isMeteorStomping: false,
-    stompImpactTime: 0,
-    airChargeTime: 0,
-    lastAirCharge: 0,
-    psychedelia: 0,
-    bufferedSpaceTime: 0,
-    justLaunched: 0
+    currentTrick: null as string | null,
+    trickStartTime: 0,
+    psychedelia: 0
   });
 
   const bgEffectRef = useRef<HTMLDivElement>(null);
@@ -96,39 +87,98 @@ export default function TrickshotGame() {
     canvasRef.current.width = W;
     canvasRef.current.height = H;
 
-    const engine = Engine.create({ gravity: { x: 0, y: 2.5, scale: 0.001 } });
-    engine.gravity.y = 2.5;
+    // Increased Gravity for Downhill Speed
+    const engine = Engine.create({ gravity: { x: 0, y: levelType === 'SANDBOX' ? 2 : 8, scale: 0.001 } });
     const world = engine.world;
     
     // Create bodies
-    const ballRadius = 16;
-    const ball = Bodies.circle(W * 0.3, H * 0.4, ballRadius, {
-      restitution: 0.9, 
-      friction: 0.05, 
-      frictionAir: 0.008, 
-      density: 0.004, 
+    const ballRadius = 20; // Slightly larger for downhill
+    const ball = Bodies.circle(W * 0.1, -H * 0.5, ballRadius, {
+      restitution: 0.75, // Higher for snappy, explosive bounces
+      friction: 0.001, 
+      frictionAir: 0.001, // Extremely low for minimal drag
+      density: 0.015,     // Higher density for more weight/punchiness
       label: 'ball'
     });
 
-    // Make walls and ground massive to accommodate camera zoom/pan
-    const ground = Bodies.rectangle(W/2, H+25, W*10, 50, { isStatic: true, label: 'surface', restitution: 0.9 });
-    const wallL = Bodies.rectangle(-25, -H*4, 50, H*10, { isStatic: true, label: 'surface', restitution: 0.9 });
-    const wallR = Bodies.rectangle(W+25, -H*4, 50, H*10, { isStatic: true, label: 'surface', restitution: 0.9 });
-    const ceiling = Bodies.rectangle(W/2, -H*4 - 25, W*10, 50, { isStatic: true, label: 'surface', restitution: 0.9 });
+    // Generate Terrain based on levelType
+    const terrain = [];
+    let currY = 0; // Maintain scope for reset check
     
-    // Static Trick Ramps
-    const rampL = Bodies.rectangle(W * 0.1, H * 0.7, 500, 30, { isStatic: true, angle: -Math.PI / 8, label: 'surface', restitution: 0.8 });
-    const rampR = Bodies.rectangle(W * 0.9, H * 0.5, 400, 30, { isStatic: true, angle: Math.PI / 6, label: 'surface', restitution: 0.8 });
-    const rampM = Bodies.rectangle(W * 0.5, H * 0.2, 300, 20, { isStatic: true, angle: 0, label: 'surface', restitution: 0.8 });
-    stateRef.current.customBodies.push(rampL, rampR, rampM);
+    if (levelType === 'SANDBOX') {
+        currY = window.innerHeight; // baseline for reset
+        const ground = Bodies.rectangle(W/2, H+25, W*10, 50, { isStatic: true, label: 'surface', restitution: 0.1, friction: 0.001 });
+        const wallL = Bodies.rectangle(-25, -H*4, 50, H*10, { isStatic: true, label: 'surface', restitution: 0.1, friction: 0.001 });
+        const wallR = Bodies.rectangle(W*2+25, -H*4, 50, H*10, { isStatic: true, label: 'surface', restitution: 0.1, friction: 0.001 });
+        const ceiling = Bodies.rectangle(W/2, -H*4 - 25, W*10, 50, { isStatic: true, label: 'surface', restitution: 0.1, friction: 0.001 });
+        
+        // Static Trick Ramps
+        const rampL = Bodies.rectangle(W * 0.1, H * 0.7, 500, 30, { isStatic: true, angle: -Math.PI / 8, label: 'surface', restitution: 0.1, friction: 0.001, chamfer: { radius: 10 } });
+        const rampR = Bodies.rectangle(W * 0.9, H * 0.5, 400, 30, { isStatic: true, angle: Math.PI / 6, label: 'surface', restitution: 0.1, friction: 0.001, chamfer: { radius: 10 } });
+        const rampM = Bodies.rectangle(W * 0.5, H * 0.2, 300, 20, { isStatic: true, angle: 0, label: 'surface', restitution: 0.1, friction: 0.001, chamfer: { radius: 10 } });
+        const bowlL = Bodies.circle(W * 0.3, H, 300, { isStatic: true, label: 'surface', restitution: 0.1, friction: 0.001 });
+        
+        terrain.push(ground, wallL, wallR, ceiling, rampL, rampR, rampM, bowlL);
+        
+        Body.setPosition(ball, { x: W * 0.3, y: H * 0.4 });
+    } else {
+        // Procedural generation
+        const segments = 200;
+        const segWidth = 400;
+        let currX = -500;
+        currY = 0;
+        
+        for (let i = 0; i < segments; i++) {
+            let angle = 0;
+            if (levelType === 'DOWNHILL_30') {
+               angle = Math.PI / 6; // strictly ~30 degrees downhill
+            } else if (levelType === 'SONIC_PROTOTYPE') {
+                // Loops, steep drops, and speed sections
+                if (i % 20 === 0) angle = Math.PI / 2; // Steep drop
+                else if (i % 20 < 5) angle = 0; // Flat speed
+                else if (i % 20 < 10) angle = -Math.PI / 4; // Loop up
+                else angle = Math.PI / 8; // Gentle downhill
+            } else {
+               // DYNAMIC_HILLS
+               angle = Math.PI / 16 + Math.random() * 0.1; 
+               if (i % 6 === 0) angle = -Math.PI / 8; // ramp up
+               else if (i % 7 === 0) angle = Math.PI / 4; // steep drop
+            }
+            
+            const dx = Math.cos(angle) * segWidth;
+            const dy = Math.sin(angle) * segWidth;
+            const midX = currX + dx / 2;
+            const midY = currY + dy / 2;
+            
+            const rect = Bodies.rectangle(midX, midY, segWidth + 20, 60, { 
+                isStatic: true, 
+                angle: angle, 
+                label: 'surface', 
+                restitution: 0.25, // Increased bounciness for better launch
+                friction: 0.005,    // Slightly higher friction to allow grip for the jump
+            });
+            terrain.push(rect);
+            
+            const circle = Bodies.circle(currX, currY, 15, { // Smaller radius joiner
+                isStatic: true,
+                label: 'surface',
+                restitution: 0.25,
+                friction: 0.005
+            });
+            terrain.push(circle);
+            
+            currX += dx;
+            currY += dy;
+        }
+        Body.setPosition(ball, { x: W * 0.1, y: -H * 0.5 });
+    }
 
-    const hoopSensor = Bodies.circle(stateRef.current.hoopX, stateRef.current.hoopY, 28, { 
-      isSensor: true, 
-      isStatic: true, 
-      label: 'hoop' 
-    });
+    stateRef.current.customBodies = terrain;
 
-    World.add(world, [ball, ground, wallL, wallR, ceiling, hoopSensor, rampL, rampR, rampM]);
+    // Remove Hoop
+    // const hoopSensor = ...
+
+    World.add(world, [ball, ...terrain]);
 
     const triggerShake = (amount: number) => {
       stateRef.current.shakeX = (Math.random()-0.5) * amount * 2;
@@ -158,43 +208,37 @@ export default function TrickshotGame() {
     };
 
     Events.on(engine, 'collisionStart', event => {
-      event.pairs.forEach(({ bodyA, bodyB }) => {
+      event.pairs.forEach(pair => {
+        const { bodyA, bodyB, collision } = pair;
         const isBall = bodyA.label === 'ball' || bodyB.label === 'ball';
         const isSurface = bodyA.label === 'surface' || bodyB.label === 'surface';
-        const isHoop = bodyA.label === 'hoop' || bodyB.label === 'hoop';
-        
         const isBouncy = bodyA.label === 'bouncy_pad' || bodyB.label === 'bouncy_pad';
+        
         if (isBall && (isSurface || isBouncy)) {
           const st = stateRef.current;
           st.lastSurfaceContact = Date.now();
-          st.chainCount = 0;
-          st.hasAirPulse = true;
           
-          const velY = Math.abs(ball.velocity.y);
-          if (st.isMeteorStomping || velY > 15 || st.airChargeTime > 50) {
-             st.stompImpactTime = Date.now();
-             st.lastAirCharge = st.airChargeTime;
-             
-             st.isMeteorStomping = false;
-             st.airChargeTime = 0;
-             triggerShake(12 + st.lastAirCharge / 40);
-             for(let i=0; i<15 + st.lastAirCharge/20; i++) {
-                st.particles.push({
-                   x: ball.position.x, y: ball.position.y + 10,
-                   vx: (Math.random()-0.5)*15, vy: -Math.random()*10,
-                   life: 1, maxLife: 1, color: '#f43f5e'
-                });
-             }
-             
-             // Jump Buffering Trigger
-             if (Date.now() - st.bufferedSpaceTime < 150) {
-                 st.bufferedSpaceTime = 0;
-                 setTimeout(() => doPulse(), 10); // execute just after physics resolve
-             }
-          } else {
-             st.airChargeTime = 0;
-             st.lastAirCharge = 0;
+          // Momentum Transfer Calculation (Slope Alignment)
+          // Only apply if landing (moving down) to avoid killing speed on ramp uphills/grazes
+          if (collision && collision.normal && ball.velocity.y > 2) {
+              const normal = collision.normal;
+              const surfaceAngle = Math.atan2(normal.y, normal.x);
+              const velAngle = Math.atan2(ball.velocity.y, ball.velocity.x);
+              const angleDiff = Math.abs(velAngle - (surfaceAngle + Math.PI/2));
+              const momentumTransfer = Math.max(0.4, 1 - Math.abs(angleDiff) / Math.PI);
+              
+              Body.setVelocity(ball, { 
+                  x: ball.velocity.x * momentumTransfer, 
+                  y: ball.velocity.y * momentumTransfer 
+              });
           }
+
+          // Bounce Bonus
+          stateRef.current.streak++;
+          const pts = 50 * stateRef.current.streak;
+          stateRef.current.score += pts;
+          setScore(stateRef.current.score);
+          setStreak(stateRef.current.streak);
 
           const vel = Math.sqrt(ball.velocity.x**2 + ball.velocity.y**2);
           const color = isBouncy ? '#f43f5e' : '#94a3b8';
@@ -211,214 +255,134 @@ export default function TrickshotGame() {
              }
           }
         }
-        if (isBall && isHoop) scoreGoal();
       });
     });
 
     const resetBall = () => {
-      Body.setPosition(ball, { x: W * 0.3, y: H * 0.4 });
+      if (levelType === 'SANDBOX') {
+        Body.setPosition(ball, { x: W * 0.3, y: H * 0.4 });
+      } else if (levelType === 'SONIC_PROTOTYPE') {
+        Body.setPosition(ball, { x: W * 0.1, y: -H * 0.2 });
+      } else {
+        Body.setPosition(ball, { x: W * 0.1, y: -H * 0.5 });
+      }
       Body.setVelocity(ball, { x: 0, y: 0 });
-      stateRef.current.streak = 0;
-      setStreak(0);
+      stateRef.current.streak = 1;
+      stateRef.current.currentTrick = null;
+      setStreak(1);
+
+      // Clean up custom bouncy pads 
+      const bouncies = stateRef.current.customBodies.filter(b => b.label === 'bouncy_pad');
+      World.remove(world, bouncies);
+      stateRef.current.customBodies = stateRef.current.customBodies.filter(b => b.label !== 'bouncy_pad');
     };
 
-    const doPulse = () => {
-      const st = stateRef.current;
-      const { x: vx, y: vy } = ball.velocity;
-      const sinceContact = Date.now() - st.lastSurfaceContact;
-      const isGround = sinceContact < 150;
-      
-      const isUp = st.keys['KeyW'] || st.keys['ArrowUp'];
-      const isDown = st.keys['KeyS'] || st.keys['ArrowDown'];
-      const timeSinceImpact = Date.now() - st.stompImpactTime;
-
-      // --- GROUND LAUNCH LOGIC ---
-      if (isGround) {
-          if (isDown) {
-              st.justLaunched = Date.now();
-              // Perfect Tech Window
-              if (timeSinceImpact < 150 && st.stompImpactTime > 0) {
-                  const perfRatio = 1 - (timeSinceImpact / 150); // 1.0 is frame perfect
-                  const chargeMult = Math.min(st.lastAirCharge / 400, 3.0);
-                  const bonusAdd = Math.floor(3 + chargeMult * 3 + perfRatio * 4);
-
-                  st.pulses++;
-                  setPulses(st.pulses);
-                  st.chainCount += bonusAdd;
-                  st.hasAirPulse = true;
-                  st.psychedelia = Math.max(0.6, chargeMult * 1.5 + perfRatio * 1.5);
-                  triggerShake(30 + perfRatio * 20 + chargeMult * 15);
-                  
-                  let title = "PERFECT!";
-                  let color = "#10b981";
-                  if (perfRatio > 0.8) { title = "FRAME PERFECT!!"; color = "#ffffff"; }
-                  showNotif(title, `+${bonusAdd} SURGE`, color);
-
-                  const extraH = st.keys['KeyD'] || st.keys['ArrowRight'] ? 15 : (st.keys['KeyA'] || st.keys['ArrowLeft'] ? -15 : 0);
-                  const powerY = -30 - (st.chainCount * 1.0) - (chargeMult * 12) - (perfRatio * 10);
-                  Body.setVelocity(ball, { x: vx + extraH, y: powerY });
-                  
-                  st.stompImpactTime = 0;
-                  st.lastAirCharge = 0;
-                  
-                  for(let i=0; i<40 + perfRatio*30; i++) {
-                      st.particles.push({
-                        x: ball.position.x, y: ball.position.y,
-                        vx: (Math.random()-0.5)*30, vy: (Math.random()-0.5)*30,
-                        life: 1, maxLife: 1.5, color: '#10b981'
-                      });
-                  }
-                  return;
-              } else {
-                  // Standard Charged Launch (Down + Space, un-timed)
-                  st.pulses++;
-                  setPulses(st.pulses);
-                  st.chainCount = 0; 
-                  st.hasAirPulse = true;
-                  triggerShake(10);
-                  showNotif('HEAVY LAUNCH', '', '#f59e0b');
-                  const extraH = st.keys['KeyD'] || st.keys['ArrowRight'] ? 10 : (st.keys['KeyA'] || st.keys['ArrowLeft'] ? -10 : 0);
-                  Body.setVelocity(ball, { x: vx + extraH, y: -26 });
-                  return;
-              }
-          } else if (isUp) {
-              st.justLaunched = Date.now();
-              st.pulses++;
-              setPulses(st.pulses);
-              st.chainCount = 0;
-              st.hasAirPulse = true;
-              triggerShake(4);
-              showNotif('HOP', '', '#94a3b8');
-              const extraH = st.keys['KeyD'] || st.keys['ArrowRight'] ? 8 : (st.keys['KeyA'] || st.keys['ArrowLeft'] ? -8 : 0);
-              Body.setVelocity(ball, { x: vx + extraH, y: -18 });
-              return;
-          } else {
-              showNotif('LOCKED', '▲ / ▼ + SPACE', '#ef4444');
-              triggerShake(3);
-              return;
-          }
-      }
-
-      // --- AIR JUMP LOGIC ---
-      // Input buffering an upcoming crash landing
-      if (isDown && ball.velocity.y > 5) {
-          st.bufferedSpaceTime = Date.now();
-          return;
-      }
-      
-      const absVY = Math.abs(vy);
-
-      // 2. Air Jump
-      if (!st.hasAirPulse) {
-        showNotif('NO CHARGE', '', '#64748b');
-        return;
-      }
-
-      st.pulses++;
-      setPulses(st.pulses);
-      
-      const isPerfect = absVY <= 1.5;
-
-      if (isPerfect) {
-        // PERFECT APEX - Refund the pulse!
-        st.chainCount++;
-        st.hasAirPulse = true; 
+    const evaluateTrick = () => {
+        const st = stateRef.current;
+        if (!st.currentTrick) return;
         
-        triggerShake(15 + st.chainCount * 3);
-        showNotif(`APEX PERFECT!`, `x${st.chainCount}`, '#fbbf24');
+        const vy = ball.velocity.y;
+        const absVY = Math.abs(vy);
+        const trickName = st.currentTrick;
+        
+        let quality = '';
+        let color = '';
+        let points = 0;
+        
+        if (absVY < 2.0) {
+            quality = 'PERFECT';
+            color = '#10b981'; // emerald
+            points = 1000;
+            triggerShake(10);
+            st.psychedelia = 1.0;
+        } else if (absVY < 6.0) {
+            quality = 'GOOD';
+            color = '#38bdf8'; // sky
+            points = 500;
+            triggerShake(4);
+            st.psychedelia = 0.4;
+        } else {
+            quality = 'SLOPPY';
+            color = '#f59e0b'; // amber
+            points = 100;
+        }
+        
+        st.chainCount++;
+        st.streak = st.chainCount;
+        setStreak(st.streak);
+        
+        const totalPts = points * st.streak;
+        st.score += totalPts;
+        setScore(st.score);
+        
+        showNotif(`${trickName}!`, `${quality} +${totalPts}`, color);
         
         // Explosion particles
-        for(let i=0; i<30; i++) {
+        for(let i=0; i< (points/50); i++) {
            st.particles.push({
              x: ball.position.x, y: ball.position.y,
-             vx: (Math.random()-0.5)*20, vy: (Math.random()-0.5)*20,
-             life: 1, maxLife: 1, color: '#fbbf24'
+             vx: (Math.random()-0.5)*15, vy: (Math.random()-0.5)*15,
+             life: 1, maxLife: 1, color: color
            });
         }
-
-        const extraH = st.keys['KeyD'] || st.keys['ArrowRight'] ? 8 : 
-                       (st.keys['KeyA'] || st.keys['ArrowLeft'] ? -8 : 0);
-                       
-        Body.setVelocity(ball, { x: vx + extraH, y: -26 - (st.chainCount * 3) });
-      } else {
-        // WEAK JUMP - Expend the pulse
-        st.chainCount = 0;
-        st.hasAirPulse = false;
-        triggerShake(4);
-        showNotif('WEAK ARC', 'CHAIN DROPPED', '#94a3b8');
-        Body.setVelocity(ball, { x: vx, y: -16 });
-      }
+        
+        st.currentTrick = null;
     };
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.repeat) return; // Ignore hold repeats for action triggers
+      if (e.repeat) return;
       const st = stateRef.current;
-      
       st.keys[e.code] = true;
-      
-      if (e.code === 'Space') { 
-        e.preventDefault(); 
-        doPulse(); 
-      }
-      
-      // STOMP / DASH / LAUNCH Mechanics
-      if (e.code === 'KeyS' || e.code === 'ArrowDown') {
-         const sinceContact = Date.now() - st.lastSurfaceContact;
-         if (sinceContact > 150) {
-            // METEOR STOMP INIT
-            if (!st.isMeteorStomping) {
-               st.isMeteorStomping = true;
-               st.airChargeTime = 0;
-               Body.setVelocity(ball, { x: ball.velocity.x * 0.3, y: Math.max(ball.velocity.y, 18) });
-               triggerShake(12);
-               showNotif('DIVE', '', '#f43f5e');
-            }
-         }
-      }
-      
       if (e.code === 'KeyR') resetBall();
+      
+      // Sonic Spin Dash Charge
+      if (e.code === 'KeyS' || e.code === 'ArrowDown') {
+          st.charge = 0;
+      }
+      if ((e.code === 'KeyA' || e.code === 'ArrowLeft' || e.code === 'KeyD' || e.code === 'ArrowRight') && (st.keys['KeyS'] || st.keys['ArrowDown'])) {
+          const now = Date.now();
+          if (now - st.lastTapTime < 200 && st.lastTapKey !== e.code) {
+              st.charge = Math.min(st.charge + 5, 20); // Charge up
+              st.lastTapTime = now;
+              st.lastTapKey = e.code;
+              // Visual feedback
+              triggerShake(st.charge / 2);
+          } else if (now - st.lastTapTime < 500) {
+              st.lastTapTime = now;
+              st.lastTapKey = e.code;
+          }
+      }
     };
 
     const handleKeyUp = (e: KeyboardEvent) => {
-      stateRef.current.keys[e.code] = false;
-      if (e.code === 'KeyS' || e.code === 'ArrowDown') {
-         stateRef.current.isMeteorStomping = false; // Cancel stomp physics if released early
+      const st = stateRef.current;
+      // Sonic Spin Dash Release
+      if ((e.code === 'KeyS' || e.code === 'ArrowDown') && st.charge > 0) {
+          Body.applyForce(ball, ball.position, { x: st.charge * 0.005, y: 0 });
+          st.charge = 0;
       }
+      st.keys[e.code] = false;
     };
 
     document.addEventListener('keydown', handleKeyDown);
     document.addEventListener('keyup', handleKeyUp);
 
-    // Mouse / Touch events for Hoop Dragging
+    // Mouse / Touch events for drawing bouncy pads
     const handleDown = (clientX: number, clientY: number) => {
       // Convert screen coords to world coords taking zoom and camera into account
       const st = stateRef.current;
       const worldX = (clientX - W/2) / st.cameraZoom + W/2 + st.cameraX;
       const worldY = (clientY - H/2) / st.cameraZoom + H/2 + st.cameraY;
       
-      const dx = worldX - st.hoopX;
-      const dy = worldY - st.hoopY;
-      if (Math.sqrt(dx*dx + dy*dy) < 60) { 
-        st.dragTarget = true; 
-        st.hoopDragOffX = dx; 
-        st.hoopDragOffY = dy; 
-      } else {
-        st.isDrawing = true;
-        st.drawStartX = worldX;
-        st.drawStartY = worldY;
-        st.drawCurrX = worldX;
-        st.drawCurrY = worldY;
-      }
+      st.isDrawing = true;
+      st.drawStartX = worldX;
+      st.drawStartY = worldY;
+      st.drawCurrX = worldX;
+      st.drawCurrY = worldY;
     };
     const handleMove = (clientX: number, clientY: number) => {
       const st = stateRef.current;
-      if (st.dragTarget) {
-        const worldX = (clientX - W/2) / st.cameraZoom + W/2 + st.cameraX;
-        const worldY = (clientY - H/2) / st.cameraZoom + H/2 + st.cameraY;
-        st.hoopX = worldX - st.hoopDragOffX;
-        st.hoopY = worldY - st.hoopDragOffY;
-        Body.setPosition(hoopSensor, { x: st.hoopX, y: st.hoopY });
-      } else if (st.isDrawing) {
+      if (st.isDrawing) {
         const worldX = (clientX - W/2) / st.cameraZoom + W/2 + st.cameraX;
         const worldY = (clientY - H/2) / st.cameraZoom + H/2 + st.cameraY;
         st.drawCurrX = worldX;
@@ -448,7 +412,6 @@ export default function TrickshotGame() {
           st.customBodies.push(pad);
         }
       }
-      st.dragTarget = false; 
     };
 
     const onMouseDown = (e: MouseEvent) => handleDown(e.clientX, e.clientY);
@@ -458,13 +421,8 @@ export default function TrickshotGame() {
     const onTouchStart = (e: TouchEvent) => {
       const t = e.touches[0];
       handleDown(t.clientX, t.clientY);
-      // Only do a pulse if they aren't dragging hoop and it's mobile
-      if (!stateRef.current.dragTarget) {
-         // doPulse(); // We might not want screen tap pulse if spacebar is core
-      }
     };
     const onTouchMove = (e: TouchEvent) => {
-      if (stateRef.current.dragTarget) e.preventDefault(); // prevent scrolling
       handleMove(e.touches[0].clientX, e.touches[0].clientY);
     };
     const onTouchEnd = () => handleUp();
@@ -484,10 +442,6 @@ export default function TrickshotGame() {
         canvasRef.current.width = W;
         canvasRef.current.height = H;
       }
-      Body.setPosition(ground,  { x: W/2, y: H+25 });
-      Body.setPosition(wallL,   { x: -25, y: -H*4 });
-      Body.setPosition(wallR,   { x: W+25, y: -H*4 });
-      Body.setPosition(ceiling, { x: W/2, y: -H*4 - 25 });
     };
     window.addEventListener('resize', handleResize);
 
@@ -527,67 +481,49 @@ export default function TrickshotGame() {
            }
         }
 
-        // Horizontal Control (always active but weaker than dash)
+        // Horizontal/Dash and Jump (always active)
         let dx = 0;
-        if (st.keys['KeyA'] || st.keys['ArrowLeft']) dx -= 1;
-        if (st.keys['KeyD'] || st.keys['ArrowRight']) dx += 1;
+        if (st.keys['KeyA'] || st.keys['ArrowLeft']) dx = -1;
+        if (st.keys['KeyD'] || st.keys['ArrowRight']) dx = 1;
         
+        // Horizontal Dash
         if (dx !== 0) {
-          const speedFactor = isAirborne ? 0.0006 : 0.0002;
-          Body.applyForce(ball, ball.position, { x: dx * speedFactor * ball.mass, y: 0 });
+            Body.applyForce(ball, ball.position, { x: dx * 0.001 * ball.mass, y: 0 });
         }
 
-        // Anti-Bounce (Stick to ground)
-        const isS_Held = st.keys['KeyS'] || st.keys['ArrowDown'];
-        if (isS_Held && sinceContact < 100 && (Date.now() - st.justLaunched > 150)) {
-           // kill upward bounce if the ball tries to rebound while crouching
-           if (ball.velocity.y < -0.2) {
-              Body.setVelocity(ball, { x: ball.velocity.x, y: 0 });
-           }
+        // Jump (Apply impulse upward)
+        if (!isAirborne && st.keys['Space']) {
+            Body.applyForce(ball, ball.position, { x: 0, y: -0.06 * ball.mass });
         }
 
-        // Holding S for charge
-        if (isAirborne && isS_Held && !st.dragTarget) {
-           st.airChargeTime += timeStep;
-           
-           // Apply downward acceleration
-           Body.applyForce(ball, ball.position, { x: 0, y: 0.0008 * ball.mass * (1 + st.airChargeTime/200) });
-           if (ball.velocity.y > 45) Body.setVelocity(ball, { x: ball.velocity.x, y: 45 }); // Cap velocity
-           
-           // Visual charging particles
-           if (Math.random() < 0.3) {
-              st.particles.push({
-                 x: ball.position.x + (Math.random()-0.5)*24,
-                 y: ball.position.y - 12 + (Math.random()-0.5)*10,
-                 vx: (Math.random()-0.5)*2,
-                 vy: -1 - Math.random()*5,
-                 life: 1, maxLife: 0.4 + st.airChargeTime/2000,
-                 color: st.airChargeTime > 300 ? '#fbbf24' : '#f43f5e'
-              });
-           }
+        if (isAirborne) {
+            // Air Rotation (Active skill)
+            if (dx !== 0) {
+                Body.setAngularVelocity(ball, ball.angularVelocity + dx * 0.05);
+            }
+            // Fast Fall
+            if (st.keys['KeyS'] || st.keys['ArrowDown']) {
+                Body.applyForce(ball, ball.position, { x: 0, y: 0.003 * ball.mass });
+            }
         }
-
+        
+        st.wasAirborne = isAirborne;
+        
         Engine.update(engine, timeStep);
         accumulator -= timeStep;
       }
 
-      // Update Hoop Float
-      if (!st.dragTarget) {
-        st.hoopFloatVY += (Math.sin(Date.now() * 0.001) * 0.3 - st.hoopFloatVY) * 0.05;
-        st.hoopY += st.hoopFloatVY * dt * 0.016;
-        st.hoopY = Math.max(80, Math.min(H - 120, st.hoopY));
-        Body.setPosition(hoopSensor, { x: st.hoopX, y: st.hoopY });
+      // Downhill resets automatically if you fall way off
+      if (ball.position.y > currY + 2000) {
+          resetBall();
       }
 
-      // Update Apex Gauge
-      const absVY = Math.abs(ball.velocity.y);
-      st.apexActive = absVY <= 1.5;
-      if (st.apexActive) st.apexGauge = 1;
-      else st.apexGauge = Math.max(0, 1 - (absVY / 10));
-      
       // Update Trail
       const spd = Math.sqrt(ball.velocity.x**2 + ball.velocity.y**2);
-      st.trailPoints.unshift({ x: ball.position.x, y: ball.position.y, s: spd });
+      let trickColor = 'rgba(14, 165, 233, 1)'; // Base sky-500
+      if (st.currentTrick) trickColor = 'rgba(244, 63, 94, 1)'; // Active trick rose-500
+
+      st.trailPoints.unshift({ x: ball.position.x, y: ball.position.y, s: spd, color: trickColor });
       const maxLen = Math.floor(Math.min(spd * 3, 30));
       if (st.trailPoints.length > maxLen + 1) st.trailPoints.length = maxLen + 1;
 
@@ -601,47 +537,17 @@ export default function TrickshotGame() {
       }
 
       // Fast DOM Updates
-      if (velyRef.current) velyRef.current.textContent = ball.velocity.y.toFixed(1);
-      if (velxRef.current) velxRef.current.textContent = ball.velocity.x.toFixed(1);
+      const speedStr = spd.toFixed(1);
+      if (velyRef.current) velyRef.current.textContent = speedStr;
+      if (velxRef.current) velxRef.current.textContent = speedStr;
       if (stabilityRef.current) stabilityRef.current.textContent = Math.max(0, Math.round(100 - spd * 2)) + '%';
-      if (apexBarRef.current) {
-        apexBarRef.current.style.width = `${Math.min(100, st.apexGauge * 100)}%`;
-        const color = st.apexActive ? '#fbbf24' : (!st.hasAirPulse ? '#ef4444' : '#0ea5e9');
-        apexBarRef.current.style.background = color;
-        apexBarRef.current.style.boxShadow = st.apexActive ? `0 0 15px ${color}` : 'none';
-      }
-      if (apexStateRef.current) {
-        if (!st.hasAirPulse) {
-           apexStateRef.current.textContent = 'EXHAUSTED (TOUCH GROUND)';
-           apexStateRef.current.style.color = '#ef4444';
-        } else if (st.apexActive) {
-           apexStateRef.current.textContent = `[ PERFECT APEX READY ] (CHAIN: ${st.chainCount})`;
-           apexStateRef.current.style.color = '#fbbf24';
-        } else {
-           apexStateRef.current.textContent = 'AWAITING PEAK...';
-           apexStateRef.current.style.color = '#94a3b8';
-        }
-      }
-      if (hoopStateRef.current) {
-        hoopStateRef.current.textContent = st.dragTarget ? 'DRAGGING' : 'FLOATING';
-      }
-      const dot = document.getElementById('target-state-dot');
-      if (dot) {
-        dot.style.backgroundColor = st.dragTarget ? '#fbbf24' : '#22d3ee';
-        dot.style.boxShadow = st.dragTarget ? '0 0 8px #fbbf24' : '0 0 8px #22d3ee';
-      }
 
       // Draw Phase
-
-      // Update Camera (track the ball, zoom out based on height & speed)
       const targetCamX = ball.position.x - W/2;
       const targetCamY = ball.position.y - H/2;
       
-      const speed = Math.sqrt(ball.velocity.x**2 + ball.velocity.y**2);
-      // Zoom out if high up (negative Y) or moving very fast
-      const heightZoomFactor = Math.max(0, (H*0.4 - ball.position.y) / 1500); 
-      const speedZoomFactor = Math.min(speed / 40, 0.5);
-      const targetZoom = 1 / (1 + heightZoomFactor + speedZoomFactor);
+      const speedZoomFactor = Math.min(spd / 40, 0.4);
+      const targetZoom = 1 / (0.8 + speedZoomFactor);
 
       st.cameraX += (targetCamX - st.cameraX) * 0.1;
       st.cameraY += (targetCamY - st.cameraY) * 0.1;
@@ -663,17 +569,13 @@ export default function TrickshotGame() {
       // Pan camera
       ctx.translate(-st.cameraX, -st.cameraY);
 
-      // Draw explicit surface ground
-      ctx.fillStyle = '#e2e8f0';
-      ctx.fillRect(-W*4, H, W*10, 800);
-
       // Trail
       if (st.trailPoints.length >= 2) {
         for (let i = 1; i < st.trailPoints.length; i++) {
           const p0 = st.trailPoints[i-1], p1 = st.trailPoints[i];
           const alpha = (1 - i/st.trailPoints.length) * Math.min(p0.s/20, 1) * 0.7;
           ctx.beginPath(); ctx.moveTo(p0.x, p0.y); ctx.lineTo(p1.x, p1.y);
-          ctx.strokeStyle = `rgba(14, 165, 233, ${alpha})`; // sky-500
+          ctx.strokeStyle = p0.color ? p0.color.replace(', 1)', `, ${alpha})`) : `rgba(14, 165, 233, ${alpha})`;
           ctx.lineWidth = (1 - i/st.trailPoints.length) * 6;
           ctx.lineCap = 'round'; ctx.stroke();
         }
@@ -731,25 +633,6 @@ export default function TrickshotGame() {
       ctx.globalAlpha = 1.0;
       ctx.globalCompositeOperation = 'source-over';
 
-      // Hoop
-      const hhX = st.hoopX, hhY = st.hoopY;
-      const rimW = 44, rimH = 8, backH = 60, backW = 8;
-      ctx.save();
-      ctx.fillStyle = '#cbd5e1'; ctx.strokeStyle = '#94a3b8'; ctx.lineWidth = 1.5;
-      ctx.fillRect(hhX + rimW/2 + 6, hhY - backH/2, backW, backH);
-      ctx.strokeRect(hhX + rimW/2 + 6, hhY - backH/2, backW, backH);
-      
-      ctx.fillStyle = '#f97316'; ctx.strokeStyle = '#ea580c'; ctx.lineWidth = 3;
-      ctx.beginPath(); ctx.ellipse(hhX, hhY, rimW/2, rimH/2, 0, 0, Math.PI*2); ctx.fill(); ctx.stroke();
-      
-      const dist = Math.sqrt((ball.position.x - hhX)**2 + (ball.position.y - hhY)**2);
-      if (dist < 80) {
-        ctx.beginPath(); ctx.ellipse(hhX, hhY, rimW/2, rimH/2, 0, 0, Math.PI*2);
-        ctx.strokeStyle = `rgba(16, 185, 129, ${(1 - dist/80)*0.8})`; 
-        ctx.lineWidth = 4; ctx.stroke();
-      }
-      ctx.restore();
-
       // Ball Update
       const spdV = Math.sqrt(ball.velocity.x**2 + ball.velocity.y**2);
       const angle = Math.atan2(ball.velocity.y, ball.velocity.x);
@@ -800,7 +683,7 @@ export default function TrickshotGame() {
       World.clear(world, false);
       Engine.clear(engine);
     };
-  }, []);
+  }, [levelType]);
 
   return (
     <div ref={containerRef} className="relative w-full h-screen bg-slate-50 text-slate-800 font-sans overflow-hidden select-none">
@@ -823,6 +706,17 @@ export default function TrickshotGame() {
       
       {/* Top Left: Scoring System (Minimalist) */}
       <div className="absolute top-6 left-6 flex gap-4 z-20 pointer-events-none">
+        
+        {/* ESCAPE BUTTON */}
+        {onExit && (
+          <button 
+            onClick={onExit}
+            className="pointer-events-auto bg-slate-800 text-white hover:bg-slate-700 px-4 py-2 rounded-lg font-bold uppercase tracking-widest text-xs shadow-md transition-colors"
+          >
+            ← Leave
+          </button>
+        )}
+
         <div className="flex flex-col drop-shadow-md">
           <div className="text-[10px] uppercase tracking-widest text-slate-500 font-bold mb-0">Score</div>
           <div className="text-3xl font-black text-slate-800 tabular-nums tracking-tighter leading-none">
@@ -835,6 +729,34 @@ export default function TrickshotGame() {
             x{streak}
           </div>
         </div>
+      </div>
+
+      {/* Top Center: Level Selector */}
+      <div className="absolute top-6 left-1/2 -translate-x-1/2 z-20 pointer-events-auto flex gap-2 drop-shadow-md bg-slate-800/80 p-2 rounded-xl border border-slate-700/50 backdrop-blur-sm">
+         <button 
+           onClick={() => setLevelType('SANDBOX')}
+           className={`px-4 py-2 rounded-lg font-black text-xs uppercase tracking-widest transition-colors ${levelType === 'SANDBOX' ? 'bg-fuchsia-500 text-white' : 'text-slate-400 hover:bg-slate-700 hover:text-white'}`}
+         >
+           Skatepark
+         </button>
+         <button 
+           onClick={() => setLevelType('DYNAMIC_HILLS')}
+           className={`px-4 py-2 rounded-lg font-black text-xs uppercase tracking-widest transition-colors ${levelType === 'DYNAMIC_HILLS' ? 'bg-emerald-500 text-white' : 'text-slate-400 hover:bg-slate-700 hover:text-white'}`}
+         >
+           Dynamic Hills
+         </button>
+         <button 
+           onClick={() => setLevelType('DOWNHILL_30')}
+           className={`px-4 py-2 rounded-lg font-black text-xs uppercase tracking-widest transition-colors ${levelType === 'DOWNHILL_30' ? 'bg-orange-500 text-white' : 'text-slate-400 hover:bg-slate-700 hover:text-white'}`}
+         >
+           30º Slope
+         </button>
+         <button 
+           onClick={() => setLevelType('SONIC_PROTOTYPE')}
+           className={`px-4 py-2 rounded-lg font-black text-xs uppercase tracking-widest transition-colors ${levelType === 'SONIC_PROTOTYPE' ? 'bg-indigo-500 text-white' : 'text-slate-400 hover:bg-slate-700 hover:text-white'}`}
+         >
+           Sonic Prototype
+         </button>
       </div>
 
       {/* NOTIFICATIONS OVERLAY (Right Side, Brief) */}
