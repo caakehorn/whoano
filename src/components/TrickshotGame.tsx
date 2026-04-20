@@ -45,6 +45,9 @@ export default function TrickshotGame() {
     shakeX: 0,
     shakeY: 0,
     shakeDecay: 0,
+    cameraX: 0,
+    cameraY: 0,
+    cameraZoom: 1,
     hoopX: window.innerWidth * 0.65,
     hoopY: window.innerHeight * 0.38,
     hoopFloatVY: 0,
@@ -92,10 +95,11 @@ export default function TrickshotGame() {
       label: 'ball'
     });
 
-    const ground = Bodies.rectangle(W/2, H+25, W*2, 50, { isStatic: true, label: 'surface', restitution: 0.9 });
-    const wallL = Bodies.rectangle(-25, H/2, 50, H*2, { isStatic: true, label: 'surface', restitution: 0.9 });
-    const wallR = Bodies.rectangle(W+25, H/2, 50, H*2, { isStatic: true, label: 'surface', restitution: 0.9 });
-    const ceiling = Bodies.rectangle(W/2, -25, W*2, 50, { isStatic: true, label: 'surface', restitution: 0.9 });
+    // Make walls and ground massive to accommodate camera zoom/pan
+    const ground = Bodies.rectangle(W/2, H+25, W*10, 50, { isStatic: true, label: 'surface', restitution: 0.9 });
+    const wallL = Bodies.rectangle(-25, -H*4, 50, H*10, { isStatic: true, label: 'surface', restitution: 0.9 });
+    const wallR = Bodies.rectangle(W+25, -H*4, 50, H*10, { isStatic: true, label: 'surface', restitution: 0.9 });
+    const ceiling = Bodies.rectangle(W/2, -H*4 - 25, W*10, 50, { isStatic: true, label: 'surface', restitution: 0.9 });
     
     const hoopSensor = Bodies.circle(stateRef.current.hoopX, stateRef.current.hoopY, 28, { 
       isSensor: true, 
@@ -187,8 +191,8 @@ export default function TrickshotGame() {
         showNotif('REFLEX BONUS', '2× MOMENTUM BOOST', '#00aaff');
       }
 
-      Body.setVelocity(ball, { x: vx * 0.8, y: Math.min(vy, 0) });
-      Body.applyForce(ball, ball.position, { x: 0, y: -18 * mult * ball.mass });
+      // Snappy and predictable velocity instead of unpredictable massive applyForce
+      Body.setVelocity(ball, { x: vx * 0.8, y: Math.min(vy, 0) - 14 * mult });
     };
 
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -209,19 +213,27 @@ export default function TrickshotGame() {
 
     // Mouse / Touch events for Hoop Dragging
     const handleDown = (clientX: number, clientY: number) => {
-      const dx = clientX - stateRef.current.hoopX;
-      const dy = clientY - stateRef.current.hoopY;
+      // Convert screen coords to world coords taking zoom and camera into account
+      const st = stateRef.current;
+      const worldX = (clientX - W/2) / st.cameraZoom + W/2 + st.cameraX;
+      const worldY = (clientY - H/2) / st.cameraZoom + H/2 + st.cameraY;
+      
+      const dx = worldX - st.hoopX;
+      const dy = worldY - st.hoopY;
       if (Math.sqrt(dx*dx + dy*dy) < 60) { 
-        stateRef.current.dragTarget = true; 
-        stateRef.current.hoopDragOffX = dx; 
-        stateRef.current.hoopDragOffY = dy; 
+        st.dragTarget = true; 
+        st.hoopDragOffX = dx; 
+        st.hoopDragOffY = dy; 
       }
     };
     const handleMove = (clientX: number, clientY: number) => {
-      if (stateRef.current.dragTarget) {
-        stateRef.current.hoopX = clientX - stateRef.current.hoopDragOffX;
-        stateRef.current.hoopY = clientY - stateRef.current.hoopDragOffY;
-        Body.setPosition(hoopSensor, { x: stateRef.current.hoopX, y: stateRef.current.hoopY });
+      const st = stateRef.current;
+      if (st.dragTarget) {
+        const worldX = (clientX - W/2) / st.cameraZoom + W/2 + st.cameraX;
+        const worldY = (clientY - H/2) / st.cameraZoom + H/2 + st.cameraY;
+        st.hoopX = worldX - st.hoopDragOffX;
+        st.hoopY = worldY - st.hoopDragOffY;
+        Body.setPosition(hoopSensor, { x: st.hoopX, y: st.hoopY });
       }
     };
     const handleUp = () => { stateRef.current.dragTarget = false; };
@@ -260,8 +272,9 @@ export default function TrickshotGame() {
         canvasRef.current.height = H;
       }
       Body.setPosition(ground,  { x: W/2, y: H+25 });
-      Body.setPosition(wallR,   { x: W+25, y: H/2 });
-      Body.setPosition(ceiling, { x: W/2, y: -25 });
+      Body.setPosition(wallL,   { x: -25, y: -H*4 });
+      Body.setPosition(wallR,   { x: W+25, y: -H*4 });
+      Body.setPosition(ceiling, { x: W/2, y: -H*4 - 25 });
     };
     window.addEventListener('resize', handleResize);
 
@@ -270,12 +283,33 @@ export default function TrickshotGame() {
     let reqId: number;
     let lastTime = performance.now();
 
+    let accumulator = 0;
+    const timeStep = 1000 / 60; // Fixed 60fps physics step for extreme smoothness
+
     const loop = (time: number) => {
-      const dt = Math.min(time - lastTime, 32);
+      const dt = Math.min(time - lastTime, 100); // cap max dt to avoid spiral of death
       lastTime = time;
-      Engine.update(engine, dt);
+      accumulator += dt;
 
       const st = stateRef.current;
+
+      while (accumulator >= timeStep) {
+        // Horizontal Control (always active)
+        let dx = 0;
+        if (st.keys['KeyA'] || st.keys['ArrowLeft']) dx -= 1;
+        if (st.keys['KeyD'] || st.keys['ArrowRight']) dx += 1;
+        
+        if (dx !== 0) {
+          const sinceContact = Date.now() - st.lastSurfaceContact;
+          const isAirborne = Math.abs(ball.velocity.y) > 0.5 && sinceContact > 150;
+          // Different horizontal force rate: much stronger in air
+          const speedFactor = isAirborne ? 0.0006 : 0.0001; 
+          Body.applyForce(ball, ball.position, { x: dx * speedFactor * ball.mass, y: 0 });
+        }
+
+        Engine.update(engine, timeStep);
+        accumulator -= timeStep;
+      }
 
       // Update Hoop Float
       if (!st.dragTarget) {
@@ -328,21 +362,42 @@ export default function TrickshotGame() {
         dot.style.boxShadow = st.dragTarget ? '0 0 8px #fbbf24' : '0 0 8px #22d3ee';
       }
 
-      // Draw
-      ctx.save();
-      ctx.translate(st.shakeX, st.shakeY);
+      // Draw Phase
 
-      // Background Grid
-      ctx.fillStyle = '#05070a'; // Deeper background
-      ctx.fillRect(0, 0, W, H);
-      ctx.strokeStyle = 'rgba(30, 45, 65, 0.4)';
-      ctx.lineWidth = 0.5;
-      for (let x = 0; x < W; x += 60) { ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke(); }
-      for (let y = 0; y < H; y += 60) { ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke(); }
+      // Update Camera (track the ball, zoom out based on height & speed)
+      const targetCamX = ball.position.x - W/2;
+      const targetCamY = ball.position.y - H/2;
       
-      // Bottom line
-      ctx.strokeStyle = '#1e3a4a'; ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(0, H-1); ctx.lineTo(W, H-1); ctx.stroke();
+      const speed = Math.sqrt(ball.velocity.x**2 + ball.velocity.y**2);
+      // Zoom out if high up (negative Y) or moving very fast
+      const heightZoomFactor = Math.max(0, (H*0.4 - ball.position.y) / 1500); 
+      const speedZoomFactor = Math.min(speed / 40, 0.5);
+      const targetZoom = 1 / (1 + heightZoomFactor + speedZoomFactor);
+
+      st.cameraX += (targetCamX - st.cameraX) * 0.1;
+      st.cameraY += (targetCamY - st.cameraY) * 0.1;
+      st.cameraZoom += (targetZoom - st.cameraZoom) * 0.05;
+
+      // Update background grid via pure CSS variable injection to prevent react render
+      const bg = document.getElementById('bg-grid');
+      if (bg) {
+        bg.style.backgroundPosition = `${-st.cameraX * st.cameraZoom}px ${-st.cameraY * st.cameraZoom}px`;
+        bg.style.backgroundSize = `${40 * st.cameraZoom}px ${40 * st.cameraZoom}px`;
+      }
+
+      // Clear the canvas globally before translating
+      ctx.clearRect(0, 0, W, H);
+
+      // Setup Camera Transform
+      ctx.save();
+      // Apply shake
+      ctx.translate(st.shakeX, st.shakeY);
+      // Center for scale
+      ctx.translate(W/2, H/2);
+      ctx.scale(st.cameraZoom, st.cameraZoom);
+      ctx.translate(-W/2, -H/2);
+      // Pan camera
+      ctx.translate(-st.cameraX, -st.cameraY);
 
       // Trail
       if (st.trailPoints.length >= 2) {
@@ -393,11 +448,11 @@ export default function TrickshotGame() {
       ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(0,0,ballRadius*1.8,0,Math.PI*2); ctx.fill();
       
       // Outer
-      const bg = ctx.createRadialGradient(-4,-4,2, 0,0,ballRadius);
-      bg.addColorStop(0,'#7dd3fc'); 
-      bg.addColorStop(0.5,'#0284c7'); 
-      bg.addColorStop(1,'#0c4a6e');
-      ctx.fillStyle = bg; ctx.beginPath(); ctx.arc(0,0,ballRadius,0,Math.PI*2); ctx.fill();
+      const bgCircle = ctx.createRadialGradient(-4,-4,2, 0,0,ballRadius);
+      bgCircle.addColorStop(0,'#7dd3fc'); 
+      bgCircle.addColorStop(0.5,'#0284c7'); 
+      bgCircle.addColorStop(1,'#0c4a6e');
+      ctx.fillStyle = bgCircle; ctx.beginPath(); ctx.arc(0,0,ballRadius,0,Math.PI*2); ctx.fill();
       
       // Lines
       ctx.strokeStyle = 'rgba(255,255,255,0.2)'; ctx.lineWidth = 1;
@@ -430,7 +485,7 @@ export default function TrickshotGame() {
   return (
     <div ref={containerRef} className="relative w-full h-screen bg-[#050608] text-slate-200 font-sans overflow-hidden select-none">
       {/* Background Grid */}
-      <div className="absolute inset-0 opacity-10 pointer-events-none" style={{ backgroundImage: 'linear-gradient(#22d3ee 1px, transparent 1px), linear-gradient(90deg, #22d3ee 1px, transparent 1px)', backgroundSize: '40px 40px' }} />
+      <div id="bg-grid" className="absolute inset-0 opacity-10 pointer-events-none" style={{ backgroundImage: 'linear-gradient(#22d3ee 1px, transparent 1px), linear-gradient(90deg, #22d3ee 1px, transparent 1px)', backgroundSize: '40px 40px' }} />
       <div className="absolute inset-0 pointer-events-none" style={{ background: 'radial-gradient(circle at center, transparent 0%, #050608 100%)' }} />
 
       <canvas 
