@@ -25,7 +25,7 @@ export default function SandboxGame({ onExit }: { onExit?: () => void }) {
   const stabilityRef = useRef<HTMLSpanElement>(null);
   
   // Game State
-  const [levelType, setLevelType] = useState<'SANDBOX' | 'DOWNHILL_30' | 'DYNAMIC_HILLS' | 'SONIC_PROTOTYPE'>('SANDBOX');
+  const [levelType, setLevelType] = useState<'SANDBOX' | 'DOWNHILL_25'>('SANDBOX');
   const [score, setScore] = useState(0);
   const [streak, setStreak] = useState(0);
   const [pulses, setPulses] = useState(0);
@@ -107,69 +107,43 @@ export default function SandboxGame({ onExit }: { onExit?: () => void }) {
     
     if (levelType === 'SANDBOX') {
         currY = window.innerHeight; // baseline for reset
-        const ground = Bodies.rectangle(W/2, H+25, W*10, 50, { isStatic: true, label: 'surface', restitution: 0.1, friction: 0.001 });
-        const wallL = Bodies.rectangle(-25, -H*4, 50, H*10, { isStatic: true, label: 'surface', restitution: 0.1, friction: 0.001 });
-        const wallR = Bodies.rectangle(W*2+25, -H*4, 50, H*10, { isStatic: true, label: 'surface', restitution: 0.1, friction: 0.001 });
-        const ceiling = Bodies.rectangle(W/2, -H*4 - 25, W*10, 50, { isStatic: true, label: 'surface', restitution: 0.1, friction: 0.001 });
+        // Expanded boundaries
+        const ground = Bodies.rectangle(W * 2, H + 25, W * 20, 100, { isStatic: true, label: 'surface', restitution: 0.1, friction: 0.001 });
+        const wallL = Bodies.rectangle(-25, -H * 10, 50, H * 30, { isStatic: true, label: 'surface', restitution: 0.1, friction: 0.001 });
+        const wallR = Bodies.rectangle(W * 4 + 25, -H * 10, 50, H * 30, { isStatic: true, label: 'surface', restitution: 0.1, friction: 0.001 });
+        const ceiling = Bodies.rectangle(W * 2, -H * 25 - 25, W * 20, 100, { isStatic: true, label: 'surface', restitution: 0.1, friction: 0.001 });
         
-        // Static Trick Ramps
-        const rampL = Bodies.rectangle(W * 0.1, H * 0.7, 500, 30, { isStatic: true, angle: -Math.PI / 8, label: 'surface', restitution: 0.1, friction: 0.001, chamfer: { radius: 10 } });
-        const rampR = Bodies.rectangle(W * 0.9, H * 0.5, 400, 30, { isStatic: true, angle: Math.PI / 6, label: 'surface', restitution: 0.1, friction: 0.001, chamfer: { radius: 10 } });
-        const rampM = Bodies.rectangle(W * 0.5, H * 0.2, 300, 20, { isStatic: true, angle: 0, label: 'surface', restitution: 0.1, friction: 0.001, chamfer: { radius: 10 } });
-        const bowlL = Bodies.circle(W * 0.3, H, 300, { isStatic: true, label: 'surface', restitution: 0.1, friction: 0.001 });
+        terrain.push(ground, wallL, wallR, ceiling);
         
-        terrain.push(ground, wallL, wallR, ceiling, rampL, rampR, rampM, bowlL);
+        // Add static targets
+        for(let i=0; i<10; i++) {
+            const target = Bodies.circle(Math.random() * W * 3 + W * 0.5, Math.random() * H * 0.5, 30, { 
+                isStatic: true, 
+                label: 'target', 
+                isSensor: true, // sensor so we can detect hit without stopping movement
+                render: { fillStyle: '#eab308' } // yellow-500
+            });
+            terrain.push(target);
+        }
         
         Body.setPosition(ball, { x: W * 0.3, y: H * 0.4 });
     } else {
-        // Procedural generation
-        const segments = 200;
-        const segWidth = 400;
-        let currX = -500;
-        currY = 0;
-        
-        for (let i = 0; i < segments; i++) {
-            let angle = 0;
-            if (levelType === 'DOWNHILL_30') {
-               angle = Math.PI / 6; // strictly ~30 degrees downhill
-            } else if (levelType === 'SONIC_PROTOTYPE') {
-                // Loops, steep drops, and speed sections
-                if (i % 20 === 0) angle = Math.PI / 2; // Steep drop
-                else if (i % 20 < 5) angle = 0; // Flat speed
-                else if (i % 20 < 10) angle = -Math.PI / 4; // Loop up
-                else angle = Math.PI / 8; // Gentle downhill
-            } else {
-               // DYNAMIC_HILLS
-               angle = Math.PI / 16 + Math.random() * 0.1; 
-               if (i % 6 === 0) angle = -Math.PI / 8; // ramp up
-               else if (i % 7 === 0) angle = Math.PI / 4; // steep drop
-            }
-            
-            const dx = Math.cos(angle) * segWidth;
-            const dy = Math.sin(angle) * segWidth;
-            const midX = currX + dx / 2;
-            const midY = currY + dy / 2;
-            
-            const rect = Bodies.rectangle(midX, midY, segWidth + 20, 60, { 
-                isStatic: true, 
-                angle: angle, 
-                label: 'surface', 
-                restitution: 0.25, // Increased bounciness for better launch
-                friction: 0.005,    // Slightly higher friction to allow grip for the jump
-            });
-            terrain.push(rect);
-            
-            const circle = Bodies.circle(currX, currY, 15, { // Smaller radius joiner
-                isStatic: true,
-                label: 'surface',
-                restitution: 0.25,
-                friction: 0.005
-            });
-            terrain.push(circle);
-            
-            currX += dx;
-            currY += dy;
+        // Flat or continuous downhill slope
+        let angle = 0;
+        if (levelType === 'DOWNHILL_25') {
+            angle = Math.PI / 7.2;
         }
+
+        // Just one massive block instead of segments to prevent gaps
+        const rect = Bodies.rectangle(W * 1.5, H * 0.8, W * 5, 100, { 
+            isStatic: true, 
+            angle: angle, 
+            label: 'surface', 
+            restitution: 0.25,
+            friction: 0.005,
+        });
+        terrain.push(rect);
+        
         Body.setPosition(ball, { x: W * 0.1, y: -H * 0.5 });
     }
 
@@ -214,6 +188,20 @@ export default function SandboxGame({ onExit }: { onExit?: () => void }) {
         const isSurface = bodyA.label === 'surface' || bodyB.label === 'surface';
         const isBouncy = bodyA.label === 'bouncy_pad' || bodyB.label === 'bouncy_pad';
         
+        const isTarget = bodyA.label === 'target' || bodyB.label === 'target';
+        
+        if (isBall && isTarget) {
+            const st = stateRef.current;
+            st.score += 500;
+            setScore(st.score);
+            triggerShake(10);
+            
+            // Remove target
+            const targetBody = bodyA.label === 'target' ? bodyA : bodyB;
+            World.remove(engine.world, targetBody);
+            st.customBodies = st.customBodies.filter(b => b !== targetBody);
+        }
+
         if (isBall && (isSurface || isBouncy)) {
           const st = stateRef.current;
           st.lastSurfaceContact = Date.now();
@@ -261,8 +249,6 @@ export default function SandboxGame({ onExit }: { onExit?: () => void }) {
     const resetBall = () => {
       if (levelType === 'SANDBOX') {
         Body.setPosition(ball, { x: W * 0.3, y: H * 0.4 });
-      } else if (levelType === 'SONIC_PROTOTYPE') {
-        Body.setPosition(ball, { x: W * 0.1, y: -H * 0.2 });
       } else {
         Body.setPosition(ball, { x: W * 0.1, y: -H * 0.5 });
       }
@@ -644,10 +630,12 @@ export default function SandboxGame({ onExit }: { onExit?: () => void }) {
       ctx.rotate(angle);
       ctx.scale(stretch, squash);
       
-      // Core Glow (Blue on White background)
+      // Core Glow (Blue/Pink toggle)
+      const isTouching = Date.now() - st.lastSurfaceContact < 150;
+      const baseColor = isTouching ? '236, 72, 153' : '14, 165, 233'; // Pink or Blue
       const glow = ctx.createRadialGradient(0,0,ballRadius*0.2, 0,0,ballRadius*1.8);
-      glow.addColorStop(0, 'rgba(14, 165, 233, 0.6)'); 
-      glow.addColorStop(1, 'rgba(14, 165, 233, 0)');
+      glow.addColorStop(0, `rgba(${baseColor}, 0.6)`); 
+      glow.addColorStop(1, `rgba(${baseColor}, 0)`);
       ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(0,0,ballRadius*1.8,0,Math.PI*2); ctx.fill();
       
       // Outer
@@ -731,31 +719,18 @@ export default function SandboxGame({ onExit }: { onExit?: () => void }) {
         </div>
       </div>
 
-      {/* Top Center: Level Selector */}
       <div className="absolute top-6 left-1/2 -translate-x-1/2 z-20 pointer-events-auto flex gap-2 drop-shadow-md bg-slate-800/80 p-2 rounded-xl border border-slate-700/50 backdrop-blur-sm">
          <button 
            onClick={() => setLevelType('SANDBOX')}
            className={`px-4 py-2 rounded-lg font-black text-xs uppercase tracking-widest transition-colors ${levelType === 'SANDBOX' ? 'bg-fuchsia-500 text-white' : 'text-slate-400 hover:bg-slate-700 hover:text-white'}`}
          >
-           Skatepark
+           Sandbox
          </button>
          <button 
-           onClick={() => setLevelType('DYNAMIC_HILLS')}
-           className={`px-4 py-2 rounded-lg font-black text-xs uppercase tracking-widest transition-colors ${levelType === 'DYNAMIC_HILLS' ? 'bg-emerald-500 text-white' : 'text-slate-400 hover:bg-slate-700 hover:text-white'}`}
+           onClick={() => setLevelType('DOWNHILL_25')}
+           className={`px-4 py-2 rounded-lg font-black text-xs uppercase tracking-widest transition-colors ${levelType === 'DOWNHILL_25' ? 'bg-orange-500 text-white' : 'text-slate-400 hover:bg-slate-700 hover:text-white'}`}
          >
-           Dynamic Hills
-         </button>
-         <button 
-           onClick={() => setLevelType('DOWNHILL_30')}
-           className={`px-4 py-2 rounded-lg font-black text-xs uppercase tracking-widest transition-colors ${levelType === 'DOWNHILL_30' ? 'bg-orange-500 text-white' : 'text-slate-400 hover:bg-slate-700 hover:text-white'}`}
-         >
-           30º Slope
-         </button>
-         <button 
-           onClick={() => setLevelType('SONIC_PROTOTYPE')}
-           className={`px-4 py-2 rounded-lg font-black text-xs uppercase tracking-widest transition-colors ${levelType === 'SONIC_PROTOTYPE' ? 'bg-indigo-500 text-white' : 'text-slate-400 hover:bg-slate-700 hover:text-white'}`}
-         >
-           Sonic Prototype
+           25º Downslope
          </button>
       </div>
 
